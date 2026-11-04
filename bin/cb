@@ -18,7 +18,7 @@ CB_DIR = os.path.join(
 )
 
 # One tag for every box: BASE_IMAGE plus claude-code, built from
-# CLAUDE_DOCKERFILE. The Dockerfile in CB_DIR produces BASE_IMAGE — everything
+# CLAUDE_DOCKERFILE. The Dockerfile in CB_DIR produces BASE_IMAGE - everything
 # else, the slow part. Two images rather than two stages of one, so that
 # update-claude can never rebuild anything of the base: it does not build it, it
 # starts from it.
@@ -74,7 +74,7 @@ def slug(basename):
     but not for a hostname, and --hostname gets the same value.
 
     Runs of dashes collapse and the edges are trimmed, otherwise a dotted
-    directory name reads badly — ~/.dotfiles would become cb--dotfiles and
+    directory name reads badly - ~/.dotfiles would become cb--dotfiles and
     /workspaces/-dotfiles. A name made up entirely of discarded characters
     falls back to "box".
     """
@@ -204,7 +204,7 @@ def save_settings(path, overrides, workspace):
     """Merge `overrides` into the stored settings and write them back.
 
     A None override means the flag was not given and leaves the stored value
-    alone — --docker and --no-docker share one destination, so absent has to be
+    alone - --docker and --no-docker share one destination, so absent has to be
     distinguishable from False.
 
     `workspace` is recorded so `cb config --prune` can tell which entries belong
@@ -244,7 +244,7 @@ def resolve_settings(stored, overrides):
 #
 # `cb` is two CLIs sharing a name: its own subcommands, and a passthrough to
 # claude for the common case. The split has to happen before argparse, because
-# argparse would choke on claude's flags — and would be wrong to reject them.
+# argparse would choke on claude's flags - and would be wrong to reject them.
 # ---------------------------------------------------------------------------
 
 SUBCOMMANDS = (
@@ -267,7 +267,7 @@ SUBCOMMANDS = (
 )
 
 # Gone with the long-lived boxes. Without this they would reach claude as a
-# prompt — `cb down` would start a box to ask about "down". `cb -- down` still
+# prompt - `cb down` would start a box to ask about "down". `cb -- down` still
 # does, for anyone who means it.
 REMOVED_SUBCOMMANDS = {
     "up": "it is called `cb run` now",
@@ -279,7 +279,7 @@ REMOVED_SUBCOMMANDS = {
 # `cb exec docker ps --force` passes --force to docker, not to cb.
 VERBATIM_SUBCOMMANDS = ("exec",)
 
-# The flags cb keeps for itself. Deliberately short — every name here is one
+# The flags cb keeps for itself. Deliberately short - every name here is one
 # claude can never be given without `--`. Checked against claude's flags; there
 # is no overlap today.
 TOGGLE_FLAGS = {
@@ -316,7 +316,7 @@ VALUE_FORMS = {
 def leading_flags_end(argv):
     """Index of the first token that is not one of cb's own flags.
 
-    cb's flags may come before the subcommand — `cb --docker shell` — so that is
+    cb's flags may come before the subcommand - `cb --docker shell` - so that is
     where the subcommand is looked for. A value flag takes its value along: in
     `cb -v ls` the ls is a directory.
     """
@@ -522,8 +522,8 @@ def feature_build_args(features):
 # The directory gate
 #
 # A box bind-mounts the directory it is launched from and hands it to an agent
-# with permissions loosened, so starting one in the wrong place — $HOME, /, a
-# directory reached by a stray cd — is the expensive mistake. Where boxes may
+# with permissions loosened, so starting one in the wrong place - $HOME, /, a
+# directory reached by a stray cd - is the expensive mistake. Where boxes may
 # start is opted into per directory tree: a tag file in a directory enables it
 # and everything below, either for any directory ("all") or only for the top of
 # a git checkout ("git"), and "disable" shuts a subtree again. Anything else is
@@ -567,8 +567,8 @@ def find_tag(path):
 def is_enabled(path):
     """May a box start in `path`?
 
-    Under "git" the directory itself has to hold the .git — a file counts too,
-    which is what worktrees and submodules have — so a subdirectory of a
+    Under "git" the directory itself has to hold the .git - a file counts too,
+    which is what worktrees and submodules have - so a subdirectory of a
     checkout is refused like any other non-checkout.
     """
     found = find_tag(path)
@@ -652,7 +652,7 @@ def confirm(question, assume_yes):
 # ---------------------------------------------------------------------------
 # Docker
 #
-# Boxes are found by the labels cb stamps on them — one saying this is a box at
+# Boxes are found by the labels cb stamps on them - one saying this is a box at
 # all, one naming the host folder it was launched from. Only running ones
 # exist: every box is started with --rm.
 # ---------------------------------------------------------------------------
@@ -704,14 +704,14 @@ def running_boxes():
         ]
     )
     if out is None:
-        raise CbError("docker is not answering — is the daemon running?")
+        raise CbError("docker is not answering - is the daemon running?")
     return parse_ps_rows(out)
 
 
 def pick_box(rows, workspace, name):
     """The box `cb exec` means.
 
-    By name: the full container name, or the random suffix after its last dash —
+    By name: the full container name, or the random suffix after its last dash -
     the part that tells two runs of one checkout apart. By default: the one box
     of this workspace. Ambiguity is an error with the candidates listed, never a
     guess, because exec runs a command in whatever comes back.
@@ -777,7 +777,7 @@ def claude_version():
     release happens.
 
     Any failure falls back to "latest", which simply leaves the layer cached.
-    The scope separator has to be encoded — the registry reads an unescaped
+    The scope separator has to be encoded - the registry reads an unescaped
     slash as a path.
     """
     url = "https://registry.npmjs.org/{}/latest".format(
@@ -799,7 +799,7 @@ def claude_version():
 # gets a concrete version: a moving tag is re-resolved on a build cb did not
 # mean to change anything with. `cb update-claude` exists to redo one npm install, and a
 # Go release landing in the middle of it would invalidate the Go layer and
-# everything below — so latest is asked for when an image is built from nothing
+# everything below - so latest is asked for when an image is built from nothing
 # or rebuilt on purpose, remembered, and reused after that.
 #
 # Each lookup is the plainest unauthenticated endpoint its project publishes, and
@@ -862,7 +862,7 @@ TOOLCHAINS = {
 }
 
 
-# What the image records about itself. claude-code is in there too — it is the
+# What the image records about itself. claude-code is in there too - it is the
 # version question asked most often, and nothing else in the image can answer it.
 VERSION_LABEL = "cb.versions"
 # claude-code's version, set by CLAUDE_DOCKERFILE. cb.versions comes from the
@@ -995,7 +995,7 @@ def build_env():
 
     BuildKit is not optional for this Dockerfile: it opens with a `# syntax`
     directive and uses COPY --chmod, and the classic builder ignores the first
-    and rejects the second — at a COPY near the end, so the refusal arrives
+    and rejects the second - at a COPY near the end, so the refusal arrives
     after the Rust toolchain, the from-source sqlx-cli build and the Playwright
     layer have been redone for nothing.
 
@@ -1056,7 +1056,7 @@ def ensure_image():
     Without a base both are built, and nothing is cached then, so this is the
     one place besides rebuild-image where asking upstream for the newest
     toolchains costs nothing. That also covers an install from before the split,
-    which has a CB_IMAGE and no base — and no cb-entry either. With the base
+    which has a CB_IMAGE and no base - and no cb-entry either. With the base
     there, a missing CB_IMAGE is one npm install.
     """
     if not image_exists(BASE_IMAGE):
@@ -1080,7 +1080,7 @@ def ensure_image():
 # This is also what devcontainer.json used to hold, said in docker's own flags.
 # The CLI bought a create-or-start decision and a labelled container, and cost a
 # node process per invocation plus a config format whose only way to reach a
-# per-box value was ${localEnv:…} — every one of CB_NAME, CB_PROJECT and CB_DIND
+# per-box value was ${localEnv:…} - every one of CB_NAME, CB_PROJECT and CB_DIND
 # was smuggled through the environment because the CLI offers no variable that
 # is both sanitized and unique.
 #
@@ -1088,7 +1088,7 @@ def ensure_image():
 # listed a VS Code extension and a terminal profile, which only an editor
 # opening the folder ever read, and a box is driven from a terminal. And
 # updateRemoteUserUID, on by default, rebuilt the image to remap node's uid onto
-# the host user's — unnecessary on OrbStack, whose virtiofs presents a mount as
+# the host user's - unnecessary on OrbStack, whose virtiofs presents a mount as
 # whoever reads it, and a no-op anyway wherever the host user is uid 1000 like
 # the image's node. On a Linux host with a different uid, files cb writes into
 # the checkout would land owned by 1000; add --user "$(id -u):$(id -g)" here if
@@ -1147,7 +1147,7 @@ def workspace_folder(workspace):
     history.jsonl tags each prompt with its project. With a fixed /workspace
     every box would be the same project and would share all of it.
 
-    Deliberately carries no hash — it shows up in the prompt and in every path
+    Deliberately carries no hash - it shows up in the prompt and in every path
     Claude prints, so it stays readable. Two repos whose directory name is
     identical therefore do share one project identity; rename one of them if
     that matters.
@@ -1160,7 +1160,7 @@ def history_volume(workspace):
     that would only clutter the host. Drop the hash for one shared history.
 
     The devcontainer version of cb named these after ${devcontainerId}, a digest
-    of its own. Those volumes are orphaned rather than migrated — this is
+    of its own. Those volumes are orphaned rather than migrated - this is
     throwaway state, and `docker volume ls | grep cb-history-` finds them for
     anyone who wants the disk back.
     """
@@ -1172,7 +1172,7 @@ def ensure_history_volume(workspace):
 
     Every history volume is dangling between runs now, so `cb volume prune`
     needs the label to tell a gone checkout from one that is just idle.
-    A volume that already exists is left as it was — one from before this label
+    A volume that already exists is left as it was - one from before this label
     stays unlabelled. Asked first rather than left to `docker volume create`:
     docker treats an existing name as a no-op, podman refuses it.
     """
@@ -1198,7 +1198,7 @@ def ensure_history_volume(workspace):
 # The default location, so no PLAYWRIGHT_BROWSERS_PATH is needed and a project
 # that sets its own is left alone. The image creates the directory as node;
 # docker copies that ownership into the volume when it first mounts it, and
-# would otherwise create it root-owned — along with ~/.cache itself, which
+# would otherwise create it root-owned - along with ~/.cache itself, which
 # CARGO_TARGET_DIR lives under.
 PLAYWRIGHT_VOLUME = "cb-playwright"
 PLAYWRIGHT_DIR = "/home/{}/.cache/ms-playwright".format(BOX_USER)
@@ -1236,7 +1236,7 @@ def parse_mount(spec, workspace):
 
     DST has to be absolute, which is what keeps `src:ro` unambiguous: "ro" can
     never be a target. A comma anywhere is refused for the reason run_argv
-    gives — docker reads --mount as CSV.
+    gives - docker reads --mount as CSV.
     """
     parts = spec.split(":")
     readonly = False
@@ -1275,7 +1275,7 @@ def mount_value(mount):
 
 def merge_mounts(persistent, per_run):
     """Remembered mounts, then this run's. A run's mount on a remembered target
-    replaces it — the way to make one read-only, or point it elsewhere, for a
+    replaces it - the way to make one read-only, or point it elsewhere, for a
     single run. Two of this run's own on one target is a typo."""
     merged = {mount[1]: mount for mount in persistent}
     seen = set()
@@ -1511,7 +1511,7 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
     `podman` is rootless_podman(), asked for by the caller so this stays free
     of subprocesses.
 
-    The tty is asked for rather than assumed, and TERM forwarded with it — see
+    The tty is asked for rather than assumed, and TERM forwarded with it - see
     exec_argv.
     """
     # docker parses a --mount value as CSV, so a comma in the path would split
@@ -1637,7 +1637,7 @@ def hand_over(name, command):
 
 def box_settings(workspace, flags):
     """This box's effective settings: the stored ones, with this run's flags
-    on top. Nothing is written back — that is `cb config`'s job."""
+    on top. Nothing is written back - that is `cb config`'s job."""
     overrides = {key: flags[key] for key in SETTINGS_DEFAULTS}
     stored = load_settings(settings_path(workspace))
     return resolve_settings(stored, overrides)
@@ -1686,7 +1686,7 @@ def check_gate(workspace, force):
         return
     raise UsageError(
         "refusing to start a claude box in {}\n"
-        "{} — run `cb enable all|git [DIR]` or pass --force".format(
+        "{} - run `cb enable all|git [DIR]` or pass --force".format(
             workspace, enabled_status(workspace)
         )
     )
@@ -1749,8 +1749,8 @@ def cmd_update_claude(flags, args):
     """Pull in a new claude-code release for the next run.
 
     Builds CLAUDE_DOCKERFILE on top of the existing base and nothing else, so
-    whatever happened to the base's build cache — a prune, an edit higher up in
-    the Dockerfile — cannot turn this into a rebuild of Rust and Playwright.
+    whatever happened to the base's build cache - a prune, an edit higher up in
+    the Dockerfile - cannot turn this into a rebuild of Rust and Playwright.
     A missing base is refused for the same reason: building it here would be
     exactly that rebuild.
 
@@ -1760,7 +1760,7 @@ def cmd_update_claude(flags, args):
     reject_extra("update-claude", args)
     if not image_exists(BASE_IMAGE):
         raise CbError(
-            "{} is missing — run `cb rebuild-image` to build it".format(BASE_IMAGE)
+            "{} is missing - run `cb rebuild-image` to build it".format(BASE_IMAGE)
         )
     build_claude()
 
@@ -1877,7 +1877,7 @@ def cmd_image_config(flags, args):
     """`cb config` for the image: which toolchains the next build includes.
 
     Writes the same image.json that rebuild-image's --with-X/--without-X write,
-    and builds nothing — changing a feature is a twenty-minute rebuild, which
+    and builds nothing - changing a feature is a twenty-minute rebuild, which
     should be asked for by name. Each line says when the image on disk differs
     from what the next build will produce.
     """
@@ -2234,7 +2234,7 @@ def orphaned_history_volumes():
     Dangling alone means nothing any more: with --rm every history volume is
     dangling whenever no box of its checkout is running. Orphaned is dangling
     *and* labelled with a folder that no longer exists. Volumes from before the
-    label are reported and left alone — docker cannot add a label afterwards,
+    label are reported and left alone - docker cannot add a label afterwards,
     and guessing would delete live history.
 
     The name filter matches anywhere in the name, hence the prefix check.
@@ -2373,7 +2373,7 @@ def history_volumes():
         ]
     )
     if out is None:
-        raise CbError("docker is not answering — is the daemon running?")
+        raise CbError("docker is not answering - is the daemon running?")
     volumes = []
     for line in out.splitlines():
         name, _, folder = line.partition("\t")
@@ -2445,7 +2445,7 @@ def claude_project_move(volumes, source, target):
     Only the top of the move can change its workspace folder: everything below
     keeps its basename. The state stays where it is when the folder does not
     change, when there is none, when the new folder already has state of its
-    own, or when another checkout shares the old folder — the same basename
+    own, or when another checkout shares the old folder - the same basename
     elsewhere is the same project to Claude, and its history is not this
     move's to take.
     """
@@ -2590,7 +2590,7 @@ image features: {features}
 def reject_extra(command, args):
     """An unknown argument is refused rather than ignored.
 
-    A typo must not quietly hand back something other than what was asked for —
+    A typo must not quietly hand back something other than what was asked for -
     the reason the old --dind parsing rejected them too.
     """
     if args:
