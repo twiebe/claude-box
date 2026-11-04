@@ -4,7 +4,7 @@ Everything that shells out to docker is out of scope; what is covered here is
 the logic that decides *what* docker gets called with, which is the part that
 used to fail silently in the zsh version.
 
-cb has no .py extension — it is an executable on PATH — so it is loaded by path
+cb has no .py extension - it is an executable on PATH - so it is loaded by path
 rather than imported by name.
 """
 
@@ -416,7 +416,7 @@ class FeatureFlagsTest(unittest.TestCase):
 class ResolveFeaturesTest(unittest.TestCase):
     """Features are a property of the one shared image. Everything is off by
     default, including features added later, so a toolchain is only there when
-    asked for — and a bare `docker build` in image/ produces the
+    asked for - and a bare `docker build` in image/ produces the
     same lean image."""
 
     def test_everything_defaults_to_off(self):
@@ -542,7 +542,7 @@ class ParseVersionTest(unittest.TestCase):
 
 class BuildEnvTest(unittest.TestCase):
     """The Dockerfile cannot be built by the classic builder, and the failure it
-    gets there lands at a COPY near the end — after the Rust toolchain, the
+    gets there lands at a COPY near the end - after the Rust toolchain, the
     sqlx-cli build and the Playwright layer."""
 
     def test_asks_for_buildkit(self):
@@ -564,7 +564,7 @@ class BuildEnvTest(unittest.TestCase):
 
 class VersionLabelTest(unittest.TestCase):
     """The image records what it was built with, so `cb config` can answer "what
-    uv is in the box" without running it — and still answer after the state file
+    uv is in the box" without running it - and still answer after the state file
     is gone."""
 
     def test_reads_the_written_form(self):
@@ -618,7 +618,7 @@ class StoredVersionsTest(unittest.TestCase):
 
 class RefreshVersionsTest(unittest.TestCase):
     """A lookup that fails must not throw away the version the image already
-    has — that would silently roll a toolchain back to the Dockerfile's pin."""
+    has - that would silently roll a toolchain back to the Dockerfile's pin."""
 
     def setUp(self):
         self.addCleanup(setattr, cb, "latest_versions", cb.latest_versions)
@@ -979,7 +979,7 @@ def flag_values(argv, flag):
 
 class WorkspaceFolderTest(unittest.TestCase):
     """The checkout is mounted at a path unique per repo: everything Claude
-    keys by project — transcripts, memory, permissions, prompt history — is
+    keys by project - transcripts, memory, permissions, prompt history - is
     keyed by this path, so a fixed /workspace would make every box one
     project."""
 

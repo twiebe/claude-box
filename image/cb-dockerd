@@ -12,15 +12,15 @@ LOG=/var/log/cb-dockerd.log
 SOCKET_TIMEOUT=30
 
 # Only a box started with CB_DIND=true is privileged, and without those
-# capabilities dockerd cannot mount, write cgroups or program iptables — it
+# capabilities dockerd cannot mount, write cgroups or program iptables - it
 # would just leave an error in the log of every other box. cb bakes this value
 # into the container's environment as well as deciding --privileged from it.
 # cb-entry passes it through sudo with --preserve-env; reached by hand with
 # sudo, it survives via an env_keep line in /etc/sudoers.d.
 [ "${CB_DIND:-false}" = true ] || exit 0
 
-# A second invocation — `sudo cb-dockerd` by hand in a box whose daemon is
-# already up — must not take that daemon down, so this returns before the wipe
+# A second invocation - `sudo cb-dockerd` by hand in a box whose daemon is
+# already up - must not take that daemon down, so this returns before the wipe
 # below ever happens.
 if pgrep -x dockerd >/dev/null 2>&1; then
   exit 0
@@ -69,8 +69,8 @@ start_dockerd() {
 
 # overlay2 refuses to run on top of another overlayfs, and the container's
 # writable layer is exactly that. fuse-overlayfs does the same job from user
-# space, which is why a dind box needs /dev/fuse. Anything else — a volume, a
-# vfs-backed layer — gets the faster native driver.
+# space, which is why a dind box needs /dev/fuse. Anything else - a volume, a
+# vfs-backed layer - gets the faster native driver.
 mkdir -p /var/lib/docker
 case "$(stat -f -c %T /var/lib/docker)" in
   overlayfs) driver=fuse-overlayfs ;;
