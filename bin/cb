@@ -94,25 +94,14 @@ def path_hash(path):
 
 
 def current_workspace():
-    """The directory this box belongs to, spelled the way the shell spells it.
+    """The directory this box belongs to, with every symlink resolved.
 
-    os.getcwd() resolves symlinks; the shell's $PWD does not. The path is what
-    the container name and the settings file are hashed from and what cb stamps
-    on the container as its folder label, so the two spellings would be two
-    identities for one checkout. Preferring $PWD keeps a checkout reached
-    through a symlink at one identity.
-
-    $PWD is only believed when it still names this directory: a subshell that
-    chdir'd without updating it, or an exported value from somewhere else, would
-    otherwise rename the box.
+    The path is what the container name and the settings file are hashed from
+    and what cb stamps on the container as its folder label, so each spelling
+    would be an identity of its own. The shell's $PWD keeps whichever spelling
+    the directory was reached by - on Fedora Atomic desktops /home is a symlink
+    to /var/home, and both turn up. os.getcwd() has only the one answer.
     """
-    logical = os.environ.get("PWD")
-    if logical and os.path.isabs(logical):
-        try:
-            if os.path.samefile(logical, os.getcwd()):
-                return logical
-        except OSError:
-            pass
     return os.getcwd()
 
 
@@ -219,6 +208,29 @@ def save_settings(path, overrides, workspace):
 
     write_json(path, stored)
     return stored
+
+
+def adopt_settings():
+    """Move settings filed under a symlinked spelling to their real path.
+
+    cb used to hash the path as the shell spelled it. A file that the real path
+    already has wins, and the other stays where it is, untouched: which of two
+    sets of answers was meant cannot be worked out here.
+    """
+    directory = os.path.join(state_dir(), "projects")
+    for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
+        path = os.path.join(directory, name)
+        stored = read_json(path)
+        spelled = stored.get("path")
+        if not isinstance(spelled, str) or not os.path.isabs(spelled):
+            continue
+        real = os.path.realpath(spelled)
+        new_path = settings_path(real)
+        if real == spelled or os.path.exists(new_path):
+            continue
+        write_json(new_path, dict(stored, path=real))
+        remove_file(path)
+        print("settings: {} -> {}".format(spelled, real), file=sys.stderr)
 
 
 def resolve_settings(stored, overrides):
@@ -540,12 +552,12 @@ def find_tag(path):
     """(directory, mode) of the nearest tag at or above `path`, or None.
 
     The nearest one wins, so a "git" tag in a subtree narrows an "all" further
-    up, the other way round, and "disable" overrides either. The walk follows the path as spelled, like cd
-    does: a tag in ~ still governs a checkout under a symlinked ~/git. A tag
-    with anything but a known mode in it is an error rather than a refusal, so
-    a typo in it does not read like a missing tag.
+    up, the other way round, and "disable" overrides either. The walk follows
+    the real path: a symlink in an enabled tree does not enable what it points
+    at. A tag with anything but a known mode in it is an error rather than a
+    refusal, so a typo in it does not read like a missing tag.
     """
-    here = os.path.abspath(path)
+    here = os.path.realpath(path)
     while True:
         tag = os.path.join(here, TAG_FILE)
         if os.path.isfile(tag):
@@ -705,7 +717,11 @@ def running_boxes():
     )
     if out is None:
         raise CbError("docker is not answering - is the daemon running?")
-    return parse_ps_rows(out)
+    # A box started before cb resolved symlinks carries the old spelling.
+    return [
+        (name, started, os.path.realpath(folder) if os.path.isabs(folder) else folder)
+        for name, started, folder in parse_ps_rows(out)
+    ]
 
 
 def pick_box(rows, workspace, name):
@@ -1222,13 +1238,13 @@ MOUNT_MODES = ("ro", "rw")
 
 
 def resolve_path(path, base):
-    """`path` relative to `base`, resolved the way the shell's cd would.
+    """`path` relative to `base`, with every symlink resolved.
 
-    Logical rather than realpath, for the reason current_workspace() prefers
-    $PWD: the folder label is written in that spelling, and a symlink resolved
-    here would be a different folder there.
+    For the reason current_workspace() resolves them: the folder label and the
+    settings are keyed by the real path, and any other spelling would be a
+    different folder there.
     """
-    return os.path.normpath(os.path.join(base, os.path.expanduser(path)))
+    return os.path.realpath(os.path.join(base, os.path.expanduser(path)))
 
 
 def parse_mount(spec, workspace):
@@ -2032,8 +2048,9 @@ def cmd_mount(flags, args):
         require_sources([mount])
         updated = current + [mount]
     elif len(args) == 2 and args[0] == "rm":
-        key = resolve_path(args[1], workspace)
-        updated = [mount for mount in current if key not in (mount[0], mount[1])]
+        # A target is a path in the box, which the host's symlinks say nothing about.
+        source, target = resolve_path(args[1], workspace), os.path.normpath(args[1])
+        updated = [m for m in current if m[0] != source and m[1] != target]
         if len(updated) == len(current):
             raise CbError("no mount for " + args[1])
     else:
@@ -2460,7 +2477,7 @@ def claude_project_move(volumes, source, target):
     sharing = sorted(
         folder for _, folder in volumes
         if folder
-        and relocate(folder, source, target) is None
+        and relocate(os.path.realpath(folder), source, target) is None
         and workspace_folder(folder) == old_folder
     )
     if sharing:
@@ -2638,6 +2655,7 @@ def main(argv):
         return 0
     DRY_RUN = flags["dry_run"]
 
+    adopt_settings()
     return COMMANDS[name](flags, args)
 
 

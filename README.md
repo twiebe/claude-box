@@ -82,6 +82,11 @@ Each directory has its own settings, stored under
 `~/.local/state/claude-box/projects/`. A flag applies to that run only;
 `cb config` makes it stick. Flag beats stored setting beats default (all off).
 
+A directory is identified by its real path, with every symlink resolved, so
+`/home/you/repo` and `/var/home/you/repo` on Fedora Atomic desktops are one box
+with one set of settings. The same goes for `cb enable` tags: the ones that count
+sit at or above the real directory, not above a symlink leading to it.
+
 | Setting     | Flag                             | Effect                                                                                           |
 | ----------- | -------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `docker`    | `--docker` / `--no-docker`       | Runs a Docker daemon inside the box, as a privileged container. Needs the `docker` image feature. |

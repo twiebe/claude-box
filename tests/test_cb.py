@@ -100,10 +100,10 @@ class ContainerNameTest(unittest.TestCase):
 
 
 class WorkspaceTest(unittest.TestCase):
-    """The workspace path is what the container name is hashed from, so it has
-    to be spelled the way the shell spells it: os.getcwd() resolves symlinks and
-    $PWD does not, and a checkout reached through a symlink would otherwise get
-    a second identity and a second box."""
+    """The workspace path is what the container name and the settings file are
+    hashed from, so a directory has to have one spelling however it was reached.
+    On Fedora Atomic desktops /home is a symlink to /var/home, and $PWD keeps
+    whichever of the two the shell went through."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -118,27 +118,79 @@ class WorkspaceTest(unittest.TestCase):
         self.addCleanup(os.environ.pop, "PWD", None)
         os.chdir(str(self.real))
 
-    def test_prefers_the_shells_spelling(self):
+    def test_ignores_a_symlinked_pwd(self):
         os.environ["PWD"] = str(self.link)
-        self.assertEqual(cb.current_workspace(), str(self.link))
-
-    def test_falls_back_when_pwd_is_stale(self):
-        # A subshell that chdir'd without updating PWD, or an exported PWD from
-        # somewhere else entirely.
-        os.environ["PWD"] = str(self.real.parent)
         self.assertEqual(cb.current_workspace(), str(self.real))
 
-    def test_falls_back_when_pwd_names_nothing(self):
-        os.environ["PWD"] = str(self.real / "gone")
+    def test_entering_through_the_symlink_is_the_same_workspace(self):
+        os.chdir(str(self.link))
+        os.environ["PWD"] = str(self.link)
         self.assertEqual(cb.current_workspace(), str(self.real))
 
-    def test_falls_back_when_pwd_is_unset(self):
+    def test_does_not_need_pwd(self):
         os.environ.pop("PWD", None)
         self.assertEqual(cb.current_workspace(), str(self.real))
 
-    def test_falls_back_when_pwd_is_relative(self):
-        os.environ["PWD"] = "."
-        self.assertEqual(cb.current_workspace(), str(self.real))
+
+class AdoptSettingsTest(unittest.TestCase):
+    """Settings written while cb hashed the shell's spelling move to the real
+    path, or the box would silently start without them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.real = base / "var-home" / "repo"
+        self.real.mkdir(parents=True)
+        (base / "home").symlink_to(base / "var-home")
+        self.spelled = str(base / "home" / "repo")
+
+        state = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(base / "state")
+        self.addCleanup(
+            lambda: os.environ.pop("XDG_STATE_HOME")
+            if state is None
+            else os.environ.__setitem__("XDG_STATE_HOME", state)
+        )
+
+    def store(self, path, **settings):
+        cb.save_settings(cb.settings_path(path), settings, path)
+
+    def adopt(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            cb.adopt_settings()
+
+    def test_moves_a_symlinked_spelling_to_the_real_path(self):
+        self.store(self.spelled, docker=True)
+        self.adopt()
+        stored = cb.load_settings(cb.settings_path(str(self.real)))
+        self.assertTrue(stored["docker"])
+        self.assertEqual(stored["path"], str(self.real))
+        self.assertFalse(os.path.exists(cb.settings_path(self.spelled)))
+
+    def test_the_real_paths_own_settings_win(self):
+        self.store(self.spelled, docker=True)
+        self.store(str(self.real), docker=False)
+        self.adopt()
+        self.assertFalse(cb.load_settings(cb.settings_path(str(self.real)))["docker"])
+        self.assertTrue(cb.load_settings(cb.settings_path(self.spelled))["docker"])
+
+    def test_leaves_a_real_path_alone(self):
+        self.store(str(self.real), docker=True)
+        before = os.listdir(os.path.dirname(cb.settings_path(str(self.real))))
+        self.adopt()
+        self.assertEqual(
+            os.listdir(os.path.dirname(cb.settings_path(str(self.real)))), before
+        )
+
+    def test_a_dry_run_changes_nothing(self):
+        self.store(self.spelled, docker=True)
+        cb.DRY_RUN = True
+        self.addCleanup(setattr, cb, "DRY_RUN", False)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.adopt()
+        self.assertTrue(os.path.exists(cb.settings_path(self.spelled)))
+        self.assertFalse(os.path.exists(cb.settings_path(str(self.real))))
 
 
 class ResolveSettingsTest(unittest.TestCase):
@@ -884,16 +936,24 @@ class IsEnabledTest(unittest.TestCase):
         self.tag(self.repo, "all")
         self.assertFalse(cb.is_enabled(str(self.root)))
 
-    def test_the_walk_follows_the_path_as_spelled(self):
-        # A tag next to a symlinked ~/git governs it, though the real
-        # directory lives somewhere else.
+    def _symlinked_checkout(self):
         elsewhere = self.base / "elsewhere"
-        elsewhere.mkdir()
         (elsewhere / "repo" / ".git").mkdir(parents=True)
         home = self.base / "home"
         home.mkdir()
         (home / "git").symlink_to(elsewhere)
+        return home, elsewhere
+
+    def test_a_tag_above_a_symlink_does_not_reach_its_real_directory(self):
+        # The symlink must not carry an enabled tree's permission to whatever it
+        # points at.
+        home, _ = self._symlinked_checkout()
         self.tag(home, "git")
+        self.assertFalse(cb.is_enabled(str(home / "git" / "repo")))
+
+    def test_a_tag_above_the_real_directory_governs_the_symlink(self):
+        home, elsewhere = self._symlinked_checkout()
+        self.tag(elsewhere, "git")
         self.assertTrue(cb.is_enabled(str(home / "git" / "repo")))
 
     def test_an_unknown_mode_is_an_error(self):
@@ -993,15 +1053,23 @@ class WorkspaceFolderTest(unittest.TestCase):
 
 
 class ResolvePathTest(unittest.TestCase):
+    def test_resolves_symlinks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            (base / "real").mkdir()
+            (base / "link").symlink_to(base / "real")
+            self.assertEqual(cb.resolve_path("link/x", str(base)), str(base / "real" / "x"))
+
     def test_joins_a_relative_path_onto_the_base(self):
-        self.assertEqual(cb.resolve_path("../data", "/home/u/git/repo"), "/home/u/git/data")
+        self.assertEqual(cb.resolve_path("../data", "/nowhere/u/repo"), "/nowhere/u/data")
 
     def test_keeps_an_absolute_path(self):
-        self.assertEqual(cb.resolve_path("/srv/x/", "/home/u/git/repo"), "/srv/x")
+        self.assertEqual(cb.resolve_path("/nowhere/x/", "/nowhere/u/repo"), "/nowhere/x")
 
     def test_expands_the_home_directory(self):
         self.assertEqual(
-            cb.resolve_path("~/data", "/w"), os.path.join(os.path.expanduser("~"), "data")
+            cb.resolve_path("~/data", "/w"),
+            os.path.join(os.path.realpath(os.path.expanduser("~")), "data"),
         )
 
 
@@ -1009,16 +1077,16 @@ class ParseMountTest(unittest.TestCase):
     """SRC[:DST][:ro|rw], with DST defaulting to the way the workspace itself is
     placed: /workspaces/<slug of the basename>."""
 
-    WS = "/home/u/git/repo"
+    WS = "/nowhere/u/repo"
 
     def test_source_only_lands_next_to_the_workspace(self):
         self.assertEqual(
-            cb.parse_mount("/home/u/git/My_Lib", self.WS),
-            ("/home/u/git/My_Lib", "/workspaces/my-lib", False),
+            cb.parse_mount("/nowhere/u/My_Lib", self.WS),
+            ("/nowhere/u/My_Lib", "/workspaces/my-lib", False),
         )
 
     def test_relative_source_is_resolved_against_the_workspace(self):
-        self.assertEqual(cb.parse_mount("../lib", self.WS)[0], "/home/u/git/lib")
+        self.assertEqual(cb.parse_mount("../lib", self.WS)[0], "/nowhere/u/lib")
 
     def test_explicit_target(self):
         self.assertEqual(
@@ -1364,7 +1432,8 @@ class CmdRunTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.workspace = os.path.join(self.tmp.name, "repo")
+        self.root = os.path.realpath(self.tmp.name)
+        self.workspace = os.path.join(self.root, "repo")
         os.mkdir(self.workspace)
         self.replaced = []
         settings = os.path.join(self.tmp.name, "settings.json")
@@ -1400,9 +1469,9 @@ class CmdRunTest(unittest.TestCase):
             cb.cmd_shell(self.flags(), ["ls"])
 
     def test_per_run_mount_is_added(self):
-        cb.cmd_run(self.flags(volumes=[self.tmp.name + ":/mnt/t"]), [])
+        cb.cmd_run(self.flags(volumes=[self.root + ":/mnt/t"]), [])
         self.assertIn(
-            "type=bind,source={},target=/mnt/t".format(self.tmp.name),
+            "type=bind,source={},target=/mnt/t".format(self.root),
             flag_values(self.replaced[0], "--mount"),
         )
 
@@ -1501,8 +1570,9 @@ class MountCommandTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.workspace = os.path.join(self.tmp.name, "repo")
-        self.lib = os.path.join(self.tmp.name, "lib")
+        self.root = os.path.realpath(self.tmp.name)
+        self.workspace = os.path.join(self.root, "repo")
+        self.lib = os.path.join(self.root, "lib")
         os.mkdir(self.workspace)
         os.mkdir(self.lib)
         self.settings = os.path.join(self.tmp.name, "settings.json")
@@ -1551,6 +1621,15 @@ class MountCommandTest(unittest.TestCase):
     def test_rm_by_target(self):
         self.mount("add", "../lib")
         self.mount("rm", "/workspaces/lib")
+        self.assertEqual(self.stored(), [])
+
+    def test_rm_by_target_ignores_a_symlink_of_that_name_on_the_host(self):
+        # The target is a path in the box. Here it is a symlink on the host too,
+        # and resolving it there would miss the mount.
+        link = os.path.join(self.root, "link")
+        os.symlink(self.lib, link)
+        self.mount("add", "../lib:" + link)
+        self.mount("rm", link)
         self.assertEqual(self.stored(), [])
 
     def test_rm_unknown_is_an_error(self):
@@ -1802,14 +1881,36 @@ class LsTargetTest(unittest.TestCase):
         self.assertIsNone(cb.ls_folder([], "/home/u/git/a"))
 
     def test_dot_is_the_workspace(self):
-        self.assertEqual(cb.ls_folder(["."], "/home/u/git/a"), "/home/u/git/a")
+        self.assertEqual(cb.ls_folder(["."], "/nowhere/u/a"), "/nowhere/u/a")
 
-    def test_relative_is_logical(self):
-        self.assertEqual(cb.ls_folder(["../b"], "/home/u/git/a"), "/home/u/git/b")
+    def test_relative_is_against_the_workspace(self):
+        self.assertEqual(cb.ls_folder(["../b"], "/nowhere/u/a"), "/nowhere/u/b")
 
     def test_more_than_one_is_refused(self):
         with self.assertRaises(cb.UsageError):
             cb.ls_folder([".", ".."], "/home/u/git/a")
+
+
+class RunningBoxFolderTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        (base / "real").mkdir()
+        (base / "link").symlink_to(base / "real")
+        self.base = base
+
+    def boxes(self, folder):
+        self.addCleanup(setattr, cb, "capture", cb.capture)
+        cb.capture = lambda argv: "cb-a-1-abcd\tnow\t{}\n".format(folder)
+        return cb.running_boxes()
+
+    def test_a_box_labelled_with_a_symlink_belongs_to_the_real_path(self):
+        rows = self.boxes(self.base / "link")
+        self.assertEqual(rows, [("cb-a-1-abcd", "now", str(self.base / "real"))])
+
+    def test_a_box_without_a_folder_stays_without_one(self):
+        self.assertEqual(self.boxes("")[0][2], "-")
 
 
 class FormatTableTest(unittest.TestCase):
@@ -1848,7 +1949,7 @@ class MvCommandTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        root = self.tmp.name
+        root = self.root = os.path.realpath(self.tmp.name)
         self.source = os.path.join(root, "old")
         self.target = os.path.join(root, "new")
         self.lib = os.path.join(self.source, "lib")
@@ -1917,7 +2018,7 @@ class MvCommandTest(unittest.TestCase):
         self.assertEqual(cb.load_settings(cb.settings_path(moved))["path"], moved)
 
     def test_follows_a_mount_from_inside_in_another_box(self):
-        other = os.path.join(self.tmp.name, "other")
+        other = os.path.join(self.root, "other")
         cb.save_settings(
             cb.settings_path(other),
             {"mounts": [cb.format_mount((self.lib, "/workspaces/lib", True))]},
@@ -1930,7 +2031,7 @@ class MvCommandTest(unittest.TestCase):
         )
 
     def test_a_default_mount_target_follows_its_source(self):
-        other = os.path.join(self.tmp.name, "other")
+        other = os.path.join(self.root, "other")
         cb.save_settings(
             cb.settings_path(other),
             {"mounts": [cb.format_mount((self.source, "/workspaces/old", False))]},
@@ -1943,7 +2044,7 @@ class MvCommandTest(unittest.TestCase):
         )
 
     def test_leaves_unrelated_settings_alone(self):
-        other = os.path.join(self.tmp.name, "other")
+        other = os.path.join(self.root, "other")
         cb.save_settings(cb.settings_path(other), {"docker": True}, other)
         before = os.path.getmtime(cb.settings_path(other))
         self.mv("old", "new")
