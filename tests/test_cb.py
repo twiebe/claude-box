@@ -6,15 +6,6 @@ used to fail silently in the zsh version.
 
 cb has no .py extension — it is an executable on PATH — so it is loaded by path
 rather than imported by name.
-
-These live outside claude-box/ deliberately. Every top-level entry of a stow
-package is mapped into the target, so claude-box/tests/ would land in $HOME; the
-alternative, a .stow-local-ignore, replaces stow's entire default ignore list
-rather than adding to it, which would quietly start stowing backup files and
-.gitignore the day one appears in that directory.
-
-The leading dot keeps the directory from reading as one more stow package next
-to claude-box/ and nvim/ at the top level of the repo.
 """
 
 import contextlib
@@ -25,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-CB_PATH = Path(__file__).resolve().parents[1] / "claude-box" / ".local" / "bin" / "cb"
+CB_PATH = Path(__file__).resolve().parents[1] / "bin" / "cb"
 
 
 def _load_cb():
@@ -425,7 +416,7 @@ class FeatureFlagsTest(unittest.TestCase):
 class ResolveFeaturesTest(unittest.TestCase):
     """Features are a property of the one shared image. Everything is off by
     default, including features added later, so a toolchain is only there when
-    asked for — and a bare `docker build` in .config/claude-box produces the
+    asked for — and a bare `docker build` in image/ produces the
     same lean image."""
 
     def test_everything_defaults_to_off(self):
@@ -434,7 +425,7 @@ class ResolveFeaturesTest(unittest.TestCase):
         self.assertFalse(any(features.values()))
 
     def test_dockerfile_defaults_match(self):
-        dockerfile = (CB_PATH.parents[2] / ".config" / "claude-box" / "Dockerfile").read_text()
+        dockerfile = (CB_PATH.parents[1] / "image" / "Dockerfile").read_text()
         for feature in cb.IMAGE_FEATURES:
             arg = "WITH_" + feature.upper().replace("-", "_")
             self.assertIn("ARG {}=0".format(arg), dockerfile)

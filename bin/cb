@@ -11,7 +11,11 @@ import subprocess
 import sys
 import urllib.request
 
-CB_DIR = os.path.expanduser("~/.config/claude-box")
+# The Dockerfiles live in image/ next to bin/, wherever the checkout is. realpath
+# because cb is normally run through a symlink on PATH.
+CB_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "image"
+)
 
 # One tag for every box: BASE_IMAGE plus claude-code, built from
 # CLAUDE_DOCKERFILE. The Dockerfile in CB_DIR produces BASE_IMAGE — everything
@@ -125,8 +129,7 @@ def container_name(path):
 # so trying `cb --docker` once leaves the next bare `cb` as it was.
 #
 # The store lives under XDG_STATE_HOME and not next to the Dockerfile, because
-# that directory is stowed: stow folds a directory it alone owns into a single
-# symlink, so writing there would write into the dotfiles checkout.
+# that directory is the git checkout.
 # ---------------------------------------------------------------------------
 
 SETTINGS_VERSION = 1
@@ -407,7 +410,7 @@ def extract_flags(args):
 # All default to off, and so does every feature added later: a toolchain is in
 # the image because `cb image-config` or --with-X asked for it. The Dockerfile's
 # WITH_* ARGs default to 0 to match, which keeps a bare `docker build` in
-# .config/claude-box producing the same base cb builds for a fresh install.
+# image/ producing the same base cb builds for a fresh install.
 # ---------------------------------------------------------------------------
 
 IMAGE_FEATURES = (
