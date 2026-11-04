@@ -2,8 +2,8 @@
 
 # uv, Go and OpenTofu all come out of their official images rather than an
 # installer script: uv is only packaged from Debian forky/sid onwards, trixie's
-# Go is 1.24 while upstream is at 1.26 — a gap Go's own toolchain policy does
-# not expect — and OpenTofu is in no Debian suite at all, which leaves upstream's
+# Go is 1.24 while upstream is at 1.26 - a gap Go's own toolchain policy does
+# not expect - and OpenTofu is in no Debian suite at all, which leaves upstream's
 # image as the only source that is neither `curl | sh` nor a release tarball off
 # GitHub. Each gets a stage of its own because `COPY --from=` does not expand
 # variables.
@@ -17,7 +17,7 @@
 # The values below are a floor, not the intent: cb looks up the newest release of
 # each and passes it in with --build-arg, so a build gets current toolchains
 # without anyone editing this file. They still have to be concrete here. A moving
-# tag — golang:trixie, uv:latest — is re-resolved on every build, which would put
+# tag - golang:trixie, uv:latest - is re-resolved on every build, which would put
 # a Go release in the middle of a `cb update-claude` that meant to redo one npm
 # install and invalidate every layer below Go. These are what a bare
 # `docker build` in this directory gets, and what cb falls back to when a lookup
@@ -54,7 +54,7 @@ RUN mkdir -p /usr/local/go
 FROM go-${WITH_GO} AS go
 
 # The -minimal tag is what upstream documents for exactly this use: it carries
-# the tofu binary at /usr/local/bin/tofu and nothing else — no shell, so no RUN
+# the tofu binary at /usr/local/bin/tofu and nothing else - no shell, so no RUN
 # can happen in it. Hence the extra stage below: the enabled variant is a plain
 # node layer that lifts the binary into a directory of its own, because the
 # alias trick needs both variants to offer the same path and the disabled one
@@ -77,7 +77,7 @@ FROM kubernetes-${WITH_KUBERNETES} AS kubernetes
 
 # Debian trixie rather than Alpine: projects get built inside this container,
 # and musl costs more there than Alpine's fresher packages gain. Every tool
-# comes from the distro repos — no `wget | sh`, no GitHub release downloads.
+# comes from the distro repos - no `wget | sh`, no GitHub release downloads.
 # The only exceptions are claude-code (npm, the whole point of the box) plus uv,
 # Go, OpenTofu and kubectl, all copied out of official images (see above).
 FROM node:26-trixie-slim
@@ -96,7 +96,7 @@ ENV TZ="$TZ"
 # `locales` and generate the locale during the build.
 ENV LANG=C.UTF-8
 
-# Not read by cb — kept because tools probe it to tell a throwaway container
+# Not read by cb - kept because tools probe it to tell a throwaway container
 # apart from a workstation, Claude Code among them.
 ENV DEVCONTAINER=true
 ENV CLAUDE_CODE_FORCE_SYNC_OUTPUT=1
@@ -117,20 +117,20 @@ ENV CLAUDE_CODE_FORCE_SYNC_OUTPUT=1
 #            Not a niche case: audiopus_sys, aws-lc-sys and friends all shell
 #            out to it from build.rs and fail with "is `cmake` not installed?"
 #            before a single line of the crate itself compiles. The box already
-#            ships build-essential, pkg-config, clang and cbindgen — cmake was
+#            ships build-essential, pkg-config, clang and cbindgen - cmake was
 #            the one hole left in that set.
 #   curl     Anything probing a local endpoint: `curl localhost:3000/health`
 #            during a manual smoke test, and most upstream install snippets.
 #            Missing entirely, not merely unlinked.
-#   sqlite3  `sqlite3 <db> '<query>'` — checking SQL semantics by hand against
+#   sqlite3  `sqlite3 <db> '<query>'` - checking SQL semantics by hand against
 #            a dev database, which the app's own binary cannot answer.
-#   time     `/usr/bin/time -v <cmd>` — wall clock, peak RSS and exit status for
+#   time     `/usr/bin/time -v <cmd>` - wall clock, peak RSS and exit status for
 #            a whole command or pipeline. zsh's `time` is a builtin that reports
 #            none of that, so measuring what a build or a test run actually
 #            costs otherwise means timestamping by hand.
-#   iproute2        `ss -ltnp` — which process listens on a port, when a dev
+#   iproute2        `ss -ltnp` - which process listens on a port, when a dev
 #                   server will not start or a test cannot connect.
-#   netcat-openbsd  `nc -zv host port` — whether something answers at all,
+#   netcat-openbsd  `nc -zv host port` - whether something answers at all,
 #                   below the protocol curl speaks.
 #   openssh-client  `git push` over ssh, with the host's agent from
 #                   `cb --ssh-agent`; without it git has no ssh to call.
@@ -166,7 +166,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # worth leaving off in a box that never builds Rust. Off by default like every
 # feature; `cb image-config rust true` turns it on.
 #
-# just is not here — it is a general task runner that merely ships next to Rust
+# just is not here - it is a general task runner that merely ships next to Rust
 # in Debian, and losing it with --without-rust would be a surprise. It sits in
 # the base apt block above.
 ARG WITH_RUST=0
@@ -184,7 +184,7 @@ RUN if [ "$WITH_RUST" = 1 ]; then \
 # docker-cli is a Recommends of docker.io and would be dropped by
 # --no-install-recommends; containerd, runc and iptables are hard dependencies
 # and come along on their own. fuse-overlayfs is the storage driver for the
-# normal case — see cb-dockerd for why overlay2 is not.
+# normal case - see cb-dockerd for why overlay2 is not.
 #
 # docker-compose is trixie's 2.26.1, i.e. Compose v2. It installs the CLI
 # plugin at /usr/libexec/docker/cli-plugins/docker-compose and symlinks
@@ -199,8 +199,8 @@ RUN if [ "$WITH_RUST" = 1 ]; then \
 # in Debian.
 #
 # docker-buildx is the BuildKit client. Without it `docker build` falls back to
-# the deprecated classic builder, and anything asking for BuildKit — cb itself
-# when run inside a box, any Dockerfile with a `# syntax` line or COPY --chmod —
+# the deprecated classic builder, and anything asking for BuildKit - cb itself
+# when run inside a box, any Dockerfile with a `# syntax` line or COPY --chmod -
 # fails with "BuildKit is enabled but the buildx component is missing".
 ARG WITH_DOCKER=0
 RUN if [ "$WITH_DOCKER" = 1 ]; then \
@@ -242,7 +242,7 @@ ARG USERNAME=node
 # Either do it properly or leave the package out.
 #
 # The env_keep line keeps CB_DIND across sudo, which would otherwise drop the
-# environment cb-dockerd reads it from — both for cb-entry, which starts it at
+# environment cb-dockerd reads it from - both for cb-entry, which starts it at
 # the beginning of every box, and for reaching it by hand.
 RUN printf 'Defaults env_keep += "CB_DIND"\n%s ALL=(ALL) NOPASSWD:ALL\n' "$USERNAME" > /etc/sudoers.d/$USERNAME \
   && chmod 0440 /etc/sudoers.d/$USERNAME
@@ -253,7 +253,7 @@ RUN printf 'Defaults env_keep += "CB_DIND"\n%s ALL=(ALL) NOPASSWD:ALL\n' "$USERN
 # usually created the group already.
 RUN groupadd -f docker && usermod -aG docker "$USERNAME"
 
-# /workspaces is only the parent — the repo is bind-mounted into
+# /workspaces is only the parent - the repo is bind-mounted into
 # /workspaces/<project> at runtime, and Docker creates that subdirectory itself.
 RUN mkdir -p /usr/local/share/npm-global /commandhistory /workspaces /home/node/.claude \
   && chown -R $USERNAME:$USERNAME /usr/local/share/npm-global /commandhistory /workspaces /home/node/.claude
@@ -271,7 +271,7 @@ ENV COLORTERM=truecolor
 # Lives on the persistent volume.
 ENV HISTFILE=/commandhistory/.zsh_history
 
-# The toolchain download happens here, as node — cbindgen and just already
+# The toolchain download happens here, as node - cbindgen and just already
 # come from apt, so there is nothing to build via cargo. Deliberately ahead of
 # claude-code: this layer is ~1.5 GB and must not be invalidated by a version
 # bump of the layer below it.
@@ -289,8 +289,8 @@ COPY --from=go /usr/local/go /usr/local/go
 ENV PATH=/usr/local/go/bin:/home/node/go/bin:$PATH
 
 # sqlx-cli, for projects whose schema is managed by SQLx. Without it
-# `sqlx database reset`, `sqlx migrate run` and `cargo sqlx prepare` — the
-# commands behind the usual `make reset-db` and `make prepare` targets — cannot
+# `sqlx database reset`, `sqlx migrate run` and `cargo sqlx prepare` - the
+# commands behind the usual `make reset-db` and `make prepare` targets - cannot
 # run at all.
 #
 # rustls rather than the default native-tls, which is what keeps libssl-dev out
@@ -306,7 +306,7 @@ ENV PATH=/usr/local/go/bin:/home/node/go/bin:$PATH
 # files that go stale long before the image is rebuilt, and cargo refetches what
 # a project actually needs.
 #
-# Above claude-code for the usual cache reason — this is a from-source build of
+# Above claude-code for the usual cache reason - this is a from-source build of
 # several minutes and must not be redone for a claude-code release.
 ARG SQLX_VERSION=0.9.0
 ARG WITH_SQLX=0
@@ -321,8 +321,8 @@ RUN if [ "$WITH_SQLX" = 1 ] && [ "$WITH_RUST" = 1 ]; then \
 #
 # /workspaces/<project> is a bind mount of the host checkout, which on macOS is
 # virtiofs. Building there is slow and, worse, corrupts .rlibs. An ENV rather
-# than a line in /etc/zsh/zshrc so it reaches every process — a non-interactive
-# `cb exec cargo test`, a build an editor spawns, a hook — and not only
+# than a line in /etc/zsh/zshrc so it reaches every process - a non-interactive
+# `cb exec cargo test`, a build an editor spawns, a hook - and not only
 # interactive shells.
 #
 # One directory per box rather than per project, which is what a box already is:
@@ -334,8 +334,8 @@ RUN if [ "$WITH_SQLX" = 1 ] && [ "$WITH_RUST" = 1 ]; then \
 # intermediates land here and ship inside the image.
 ENV CARGO_TARGET_DIR=/home/node/.cache/cargo-target
 
-# The shared libraries Chromium dlopen()s at startup — libnss3, the libatk and
-# libgtk set, the fonts — and nothing else. Without them a browser that is
+# The shared libraries Chromium dlopen()s at startup - libnss3, the libatk and
+# libgtk set, the fonts - and nothing else. Without them a browser that is
 # installed perfectly well refuses to launch, and the failure reads like a
 # broken test suite rather than a missing package.
 #
@@ -346,7 +346,7 @@ ENV CARGO_TARGET_DIR=/home/node/.cache/cargo-target
 #
 # No browser binary here, deliberately. Playwright resolves the browser
 # revision from the @playwright/test version a project has installed, and
-# `playwright install` removes revisions it does not need — so a baked-in
+# `playwright install` removes revisions it does not need - so a baked-in
 # browser is ~110 MB that the first project run deletes. Projects download
 # their own, once per revision per machine: cb mounts a volume shared by every
 # box over the directory created below.
@@ -357,7 +357,7 @@ ENV CARGO_TARGET_DIR=/home/node/.cache/cargo-target
 #
 # The `apt-get update` is not redundant. install-deps shells out to `apt-get
 # install` without refreshing first, and every apt block above ends by wiping
-# /var/lib/apt/lists — so without this the build dies on "Unable to locate
+# /var/lib/apt/lists - so without this the build dies on "Unable to locate
 # package libnss3" for two dozen packages that trixie does in fact carry.
 #
 # Stays this low in the file even though it is now a small layer: a change here
@@ -411,7 +411,7 @@ RUN mkdir -p /home/node/.cache/ms-playwright
 #
 # A directory rather than the bare binary into /usr/local/bin, and an ENV to
 # reach it: that is the same shape as Go above, and it is what makes
-# --without-tofu a no-op instead of a build failure — the disabled stage hands
+# --without-tofu a no-op instead of a build failure - the disabled stage hands
 # over an empty directory, and copying one costs nothing. The PATH entry then
 # names a directory that exists but is empty, exactly as /usr/local/go does.
 #
@@ -425,7 +425,7 @@ ENV PATH=/opt/tofu:$PATH
 #
 # kubectl comes out of upstream's image like tofu, not from trixie, because of
 # its version skew policy: a client is supported against servers one minor
-# version either side of it, and trixie's 1.32 is five minors behind upstream —
+# version either side of it, and trixie's 1.32 is five minors behind upstream -
 # old enough that clusters on a current release are outside that window.
 #
 # kustomize has no such policy to break, so it stays with the apt rule at the
@@ -451,7 +451,7 @@ RUN if [ "$WITH_KUBERNETES" = 1 ]; then \
 #
 # python3 is marked externally-managed (PEP 668), so a bare `pip3 install`
 # outside a virtualenv refuses to touch the system site-packages. That is the
-# intended behaviour — use `python3 -m venv` or uv. python3-pip is here for use
+# intended behaviour - use `python3 -m venv` or uv. python3-pip is here for use
 # *inside* those environments, python3-venv for creating them.
 #
 # IPython is a `uv tool install` rather than trixie's ipython3, so it tracks
@@ -499,8 +499,8 @@ RUN if [ "$WITH_PANDOC" = 1 ]; then \
 
 # The only COPYs from the build context, and the reason they sit this low: a
 # COPY is cached on the content of what it copies, so every edit to one of these
-# scripts invalidates the layer and everything below it. Further up — where
-# cb-dockerd used to be — "below it" meant the Rust toolchain, the Go copy, the
+# scripts invalidates the layer and everything below it. Further up - where
+# cb-dockerd used to be - "below it" meant the Rust toolchain, the Go copy, the
 # from-source sqlx-cli build and the Playwright apt layer, so fixing a comment in
 # a 90-line shell script cost a multi-GB rebuild. Nothing between here and the
 # top needs either file: both are read at container start, never during the
@@ -511,14 +511,14 @@ COPY --chmod=0755 cb-entry /usr/local/bin/cb-entry
 # claude-code is not in this file. It changes more often than everything above
 # together, and cb installs it from Dockerfile.claude on top of the image this
 # file produces (claude-box:base), so `cb update-claude` never builds a layer
-# of this one — not even when the build cache for it is gone.
+# of this one - not even when the build cache for it is gone.
 
 # What this image was actually built with, so `docker inspect` can answer it.
 # cb reads this label rather than its own state file: the file only remembers
 # what to build next time and may be lost or hand-edited, while the label
 # travels with the image it describes.
 #
-# Last instructions on purpose — a LABEL is metadata and rebuilding it costs
+# Last instructions on purpose - a LABEL is metadata and rebuilding it costs
 # nothing, so it must not sit above a layer that is expensive to redo.
 ARG WITH_GO
 ARG WITH_TOFU
