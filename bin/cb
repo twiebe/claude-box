@@ -1490,7 +1490,7 @@ def rootless_podman():
 
 
 def podman_flags():
-    """What a box needs from rootless podman to write the host's directories.
+    """What a box needs from rootless podman to behave like one under docker.
 
     keep-id maps the host user onto node (uid 1000 in the image) instead of
     root, so files node writes into ~/.claude and the checkout are the host
@@ -1500,8 +1500,16 @@ def podman_flags():
     label=disable rather than :z on the bind mounts: relabelling would change
     the SELinux context of the host's ~/.claude and of every checkout for good,
     while a box is trusted with both anyway.
+
+    pids-limit: podman caps a container at 2048 threads by default, docker does
+    not cap it at all. Thread-hungry builds and test runs hit that cap and fail
+    with errors that do not name it.
     """
-    return ["--userns=keep-id:uid=1000,gid=1000", "--security-opt", "label=disable"]
+    return [
+        "--userns=keep-id:uid=1000,gid=1000",
+        "--security-opt", "label=disable",
+        "--pids-limit=-1",
+    ]
 
 
 def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
