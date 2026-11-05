@@ -1355,6 +1355,11 @@ class RunArgvTest(unittest.TestCase):
         self.assertIn("--userns=keep-id:uid=1000,gid=1000", argv)
         self.assertEqual(flag_values(argv, "--security-opt"), ["label=disable"])
 
+    def test_rootless_podman_lifts_the_thread_limit(self):
+        argv = cb.run_argv(self.workspace, False, [], ["zsh"], tty=False, podman=True)
+        self.assertIn("--pids-limit=-1", argv)
+        self.assertNotIn("--pids-limit=-1", self.argv)
+
     def test_tty_and_term_when_there_is_a_terminal(self):
         self.addCleanup(os.environ.pop, "TERM", None)
         os.environ["TERM"] = "xterm-ghostty"
