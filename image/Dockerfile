@@ -522,6 +522,21 @@ RUN if [ "$WITH_PANDOC" = 1 ]; then \
       && sudo rm -rf /var/lib/apt/lists/*; \
     fi
 
+# openscad-mcad is only a Recommends of openscad, so --no-install-recommends
+# would leave out the library that `use <MCAD/...>` expects.
+#
+# xvfb and xauth are for PNG previews. A box has no display, and without one
+# `openscad -o x.png` prints no error, segfaults (exit 139) and leaves a 0-byte
+# file; it needs `xvfb-run -a openscad -o x.png x.scad`. STL needs no display.
+# xauth is a separate package that xvfb-run dies without.
+ARG WITH_OPENSCAD=0
+RUN if [ "$WITH_OPENSCAD" = 1 ]; then \
+      sudo apt-get update \
+      && sudo apt-get install -y --no-install-recommends \
+        openscad openscad-mcad xvfb xauth \
+      && sudo rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # The only COPYs from the build context, and the reason they sit this low: a
 # COPY is cached on the content of what it copies, so every edit to one of these
 # scripts invalidates the layer and everything below it. Further up - where
@@ -547,7 +562,7 @@ COPY --chmod=0755 cb-entry /usr/local/bin/cb-entry
 # nothing, so it must not sit above a layer that is expensive to redo.
 ARG WITH_GO
 ARG WITH_TOFU
-LABEL cb.features="docker=${WITH_DOCKER},ffmpeg=${WITH_FFMPEG},go=${WITH_GO},kubernetes=${WITH_KUBERNETES},pandoc=${WITH_PANDOC},playwright-deps=${WITH_PLAYWRIGHT_DEPS},python=${WITH_PYTHON},rust=${WITH_RUST},sqlx=${WITH_SQLX},tofu=${WITH_TOFU}"
+LABEL cb.features="docker=${WITH_DOCKER},ffmpeg=${WITH_FFMPEG},go=${WITH_GO},kubernetes=${WITH_KUBERNETES},openscad=${WITH_OPENSCAD},pandoc=${WITH_PANDOC},playwright-deps=${WITH_PLAYWRIGHT_DEPS},python=${WITH_PYTHON},rust=${WITH_RUST},sqlx=${WITH_SQLX},tofu=${WITH_TOFU}"
 
 # Which versions those features came out at. Worth recording now that cb resolves
 # them instead of this file fixing them: "what uv is in the box" otherwise has no

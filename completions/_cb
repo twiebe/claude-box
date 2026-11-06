@@ -26,7 +26,7 @@ subcommands=(
   'enabled:whether a box may start in a directory'
   'mv:move a directory along with what cb keeps about it'
 )
-features=(docker ffmpeg go kubernetes pandoc playwright-deps python rust sqlx tofu)
+features=(docker ffmpeg go kubernetes openscad pandoc playwright-deps python rust sqlx tofu)
 
 if (( CURRENT == 2 )); then
   _describe -t commands 'cb command' subcommands

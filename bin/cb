@@ -426,8 +426,8 @@ def extract_flags(args):
 # ---------------------------------------------------------------------------
 
 IMAGE_FEATURES = (
-    "docker", "ffmpeg", "go", "kubernetes", "pandoc", "playwright-deps",
-    "python", "rust", "sqlx", "tofu",
+    "docker", "ffmpeg", "go", "kubernetes", "openscad", "pandoc",
+    "playwright-deps", "python", "rust", "sqlx", "tofu",
 )
 
 # Features that changed their name, old to new. Both image.json and the label of
