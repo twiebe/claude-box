@@ -154,6 +154,7 @@ default:
 | `ffmpeg`          | ffmpeg                                                                   |
 | `go`              | Go, newest release at build time                                         |
 | `kubernetes`      | kubectl (upstream, current) and kustomize                                |
+| `openscad`        | OpenSCAD with MCAD, xvfb for PNG (`xvfb-run -a openscad -o x.png x.scad`) |
 | `pandoc`          | pandoc                                                                   |
 | `playwright-deps` | the system libraries Chromium needs for Playwright, not Playwright itself |
 | `python`          | python3, pip, venv, uv and IPython                                       |
