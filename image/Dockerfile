@@ -169,10 +169,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # just is not here - it is a general task runner that merely ships next to Rust
 # in Debian, and losing it with --without-rust would be a surprise. It sits in
 # the base apt block above.
+#
+# The other four are what `cargo xwin build` shells out to, further down:
+#   lld          `lld-link`, the linker it sets for the MSVC target.
+#   llvm         `llvm-lib`, the archiver it sets for C dependencies. cargo-xwin
+#                can only fall back on the toolchain's llvm-ar if the llvm-tools
+#                component is installed, which it is not.
+#   nasm         Assembly in -sys crates, such as aws-lc-sys on x86_64-windows.
+#   ninja-build  The generator it forces on every CMake-driven -sys crate.
 ARG WITH_RUST=0
 RUN if [ "$WITH_RUST" = 1 ]; then \
       apt-get update \
-      && apt-get install -y --no-install-recommends rustup clang cbindgen \
+      && apt-get install -y --no-install-recommends \
+        rustup clang cbindgen lld llvm nasm ninja-build \
       && rm -rf /var/lib/apt/lists/*; \
     fi
 
@@ -314,6 +323,22 @@ RUN if [ "$WITH_SQLX" = 1 ] && [ "$WITH_RUST" = 1 ]; then \
       cargo install sqlx-cli@${SQLX_VERSION} --locked \
         --no-default-features \
         --features rustls,postgres,mysql,sqlite,completions,sqlx-toml \
+      && rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git"; \
+    fi
+
+# cargo-xwin, for `cargo xwin build --target x86_64-pc-windows-msvc` without a
+# Windows machine. Its apt dependencies are in the rust block further up.
+#
+# The Microsoft CRT and Windows SDK are not in the image: cargo-xwin downloads
+# them on first use, and using it means accepting Microsoft's license for them.
+# That decision belongs to whoever runs the build, not to the image.
+#
+# --locked and the registry cleanup as for sqlx-cli above. 0.23.1 wants
+# rustc >= 1.89. Below sqlx-cli so that a bump here does not rebuild it.
+ARG CARGO_XWIN_VERSION=0.23.1
+RUN if [ "$WITH_RUST" = 1 ]; then \
+      rustup target add x86_64-pc-windows-msvc \
+      && cargo install cargo-xwin@${CARGO_XWIN_VERSION} --locked \
       && rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git"; \
     fi
 

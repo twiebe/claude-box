@@ -157,7 +157,7 @@ default:
 | `pandoc`          | pandoc                                                                   |
 | `playwright-deps` | the system libraries Chromium needs for Playwright, not Playwright itself |
 | `python`          | python3, pip, venv, uv and IPython                                       |
-| `rust`            | rustup with the stable toolchain, clang, cbindgen                        |
+| `rust`            | rustup with stable, clang, cbindgen, cargo-xwin for Windows (MSVC) builds |
 | `sqlx`            | sqlx-cli; needs `rust`                                                   |
 | `tofu`            | OpenTofu, newest release at build time                                   |
 
