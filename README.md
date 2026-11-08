@@ -167,6 +167,13 @@ default is `spd-say --wait --pipe-mode` on Linux and `say -f -` on macOS; set
 export CB_SPEAK_COMMAND='piper -m ~/.local/share/piper/de_DE-thorsten-high.onnx --output-raw 2>/dev/null | pw-play --raw --format s16 --rate 22050 --channels 1 -'
 ```
 
+Claude does not speak on its own just because it can: the image ships a
+`/speak` skill, and a session talks only after `/speak` (sparse: when done, or
+waiting for you), `/speak chatty` (plus short status updates) - `/speak off`
+ends it. The skill lives in `image/skills/`, which the image copies to
+`/etc/claude-code/.claude/skills/`, so every box has it whatever host it runs
+on.
+
 What the speaker has to say about failures goes to `speak.log` in
 `~/.local/state/claude-box/`. `say` itself is part of the image, so an image
 built before this feature needs a `cb rebuild-image`.
@@ -239,7 +246,8 @@ cb mv SRC DST                # move a checkout along with its settings, mounts,
 ## Repository layout
 
 - `bin/cb` - the CLI; finds `image/` relative to its own real path
-- `image/` - the Dockerfiles and the scripts copied into the image
+- `image/` - the Dockerfiles and the scripts copied into the image;
+  `image/skills/` holds the Claude Code skills every box offers
 - `completions/_cb` - zsh completion
 - `tests/` - `python3 -m unittest discover -s tests`
 - `install.sh`, `uninstall.sh`

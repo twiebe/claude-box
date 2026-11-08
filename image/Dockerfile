@@ -550,6 +550,13 @@ COPY --chmod=0755 cb-dockerd /usr/local/bin/cb-dockerd
 COPY --chmod=0755 cb-entry /usr/local/bin/cb-entry
 COPY --chmod=0755 cb-say /usr/local/bin/say
 
+# Skills every box offers, among them /speak, which tells Claude how and when to
+# use `say`. They go to the managed-policy directory for the reason the
+# Playwright note does: ~/.claude is the host's, bind-mounted in, and nothing
+# written there at build time survives. Claude Code loads skills from
+# /etc/claude-code/.claude/skills like from ~/.claude/skills.
+COPY skills/ /etc/claude-code/.claude/skills/
+
 # claude-code is not in this file. It changes more often than everything above
 # together, and cb installs it from Dockerfile.claude on top of the image this
 # file produces (claude-box:base), so `cb update-claude` never builds a layer
