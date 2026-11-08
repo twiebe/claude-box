@@ -12,7 +12,10 @@ import contextlib
 import importlib.util
 import io
 import os
+import socket
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -373,6 +376,18 @@ class ExtractFlagsTest(unittest.TestCase):
     def test_ssh_agent_is_unset_without_the_flag(self):
         flags, _ = cb.extract_flags([])
         self.assertIsNone(flags["ssh-agent"])
+
+    def test_speak_sets_the_toggle(self):
+        flags, rest = cb.extract_flags(["--speak"])
+        self.assertEqual((flags["speak"], rest), (True, []))
+
+    def test_no_speak_clears_the_toggle(self):
+        flags, _ = cb.extract_flags(["--no-speak"])
+        self.assertIs(flags["speak"], False)
+
+    def test_speak_is_unset_without_the_flag(self):
+        flags, _ = cb.extract_flags([])
+        self.assertIsNone(flags["speak"])
 
     def test_no_docker_clears_the_toggle(self):
         flags, _ = cb.extract_flags(["--no-docker"])
@@ -1392,6 +1407,38 @@ class RunArgvTest(unittest.TestCase):
             "SSH_AUTH_SOCK=" + cb.BOX_SSH_AUTH_SOCK, flag_values(argv, "--env")
         )
 
+    def test_no_speech_by_default(self):
+        self.assertFalse(any("CB_SPEAK_SOCKET" in e for e in flag_values(self.argv, "--env")))
+        self.assertFalse(
+            any(cb.BOX_SPEAK_DIR in m for m in flag_values(self.argv, "--mount"))
+        )
+
+    def test_speech_mounts_the_socket_directory_and_names_the_socket(self):
+        argv = cb.run_argv(
+            self.workspace, False, [], ["zsh"], tty=False,
+            speaker=("unix", "/run/user/1000/x"),
+        )
+        self.assertIn(
+            "type=bind,source=/run/user/1000/x,target=" + cb.BOX_SPEAK_DIR,
+            flag_values(argv, "--mount"),
+        )
+        self.assertIn(
+            "CB_SPEAK_SOCKET={}/speak.sock".format(cb.BOX_SPEAK_DIR),
+            flag_values(argv, "--env"),
+        )
+
+    def test_speech_over_tcp_names_the_address(self):
+        argv = cb.run_argv(
+            self.workspace, False, [], ["zsh"], tty=False,
+            speaker=("tcp", "host.docker.internal:4711"),
+        )
+        self.assertIn(
+            "CB_SPEAK_ADDR=host.docker.internal:4711", flag_values(argv, "--env")
+        )
+        self.assertFalse(
+            any(cb.BOX_SPEAK_DIR in m for m in flag_values(argv, "--mount"))
+        )
+
     def test_no_ports_by_default(self):
         self.assertEqual(flag_values(self.argv, "--publish"), [])
 
@@ -1537,6 +1584,206 @@ class CmdRunTest(unittest.TestCase):
         with self.assertRaises(cb.UsageError):
             cb.cmd_run(self.flags(**{"ssh-agent": True}), [])
         self.assertEqual(self.replaced, [])
+
+
+    def speaking(self):
+        self.addCleanup(setattr, cb.sys, "platform", cb.sys.platform)
+        cb.sys.platform = "linux"
+        self.addCleanup(os.environ.pop, "XDG_RUNTIME_DIR", None)
+        os.environ["XDG_RUNTIME_DIR"] = self.root
+        self.speakers = []
+        self.addCleanup(setattr, cb, "start_speaker", cb.start_speaker)
+        def start_speaker(directory, command):
+            self.speakers.append((directory, command))
+            if directory is None:
+                return ("tcp", "host.docker.internal:4711")
+            return ("unix", directory)
+
+        cb.start_speaker = start_speaker
+
+    def test_speak_starts_a_speaker_for_this_box_and_mounts_it(self):
+        self.speaking()
+        cb.cmd_run(self.flags(speak=True), [])
+        suffix = flag_values(self.replaced[0], "--name")[0].rsplit("-", 1)[1]
+        directory = os.path.join(
+            self.root, "claude-box", "speak",
+            "{}-{}".format(cb.path_hash(self.workspace), suffix),
+        )
+        self.assertEqual([d for d, _ in self.speakers], [directory])
+        self.assertIn(
+            "type=bind,source={},target={}".format(directory, cb.BOX_SPEAK_DIR),
+            flag_values(self.replaced[0], "--mount"),
+        )
+
+    def test_stored_speak_is_used(self):
+        self.speaking()
+        cb.save_settings(cb.settings_path(self.workspace), {"speak": True}, self.workspace)
+        cb.cmd_run(self.flags(), [])
+        self.assertEqual(len(self.speakers), 1)
+
+    def test_no_speak_flag_beats_the_stored_setting(self):
+        self.speaking()
+        cb.save_settings(cb.settings_path(self.workspace), {"speak": True}, self.workspace)
+        cb.cmd_run(self.flags(speak=False), [])
+        self.assertEqual(self.speakers, [])
+        self.assertFalse(
+            any("CB_SPEAK_SOCKET" in e for e in flag_values(self.replaced[0], "--env"))
+        )
+
+    def test_speak_uses_the_hosts_command_when_it_names_one(self):
+        self.speaking()
+        self.addCleanup(os.environ.pop, "CB_SPEAK_COMMAND", None)
+        os.environ["CB_SPEAK_COMMAND"] = "piper | pw-play -"
+        cb.cmd_run(self.flags(speak=True), [])
+        self.assertEqual(self.speakers[0][1], "piper | pw-play -")
+
+    def test_speak_on_the_mac_goes_over_tcp(self):
+        self.speaking()
+        cb.sys.platform = "darwin"
+        cb.cmd_run(self.flags(speak=True), [])
+        self.assertEqual(self.speakers[0][0], None)
+        self.assertIn(
+            "CB_SPEAK_ADDR=host.docker.internal:4711",
+            flag_values(self.replaced[0], "--env"),
+        )
+
+    def test_speak_elsewhere_stops_before_docker(self):
+        self.speaking()
+        cb.sys.platform = "win32"
+        with self.assertRaises(cb.UsageError):
+            cb.cmd_run(self.flags(speak=True), [])
+        self.assertEqual((self.replaced, self.speakers), ([], []))
+
+    def test_speak_with_too_long_a_socket_path_stops_before_docker(self):
+        self.speaking()
+        deep = os.path.join(self.root, "x" * 90)
+        os.mkdir(deep)
+        os.environ["XDG_RUNTIME_DIR"] = deep
+        with self.assertRaises(cb.UsageError):
+            cb.cmd_run(self.flags(speak=True), [])
+        self.assertEqual((self.replaced, self.speakers), ([], []))
+
+    def test_speak_without_a_runtime_dir_stops_before_docker(self):
+        self.speaking()
+        del os.environ["XDG_RUNTIME_DIR"]
+        with self.assertRaises(cb.UsageError):
+            cb.cmd_run(self.flags(speak=True), [])
+        self.assertEqual((self.replaced, self.speakers), ([], []))
+
+
+class SpeakCommandTest(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(os.environ.pop, "CB_SPEAK_COMMAND", None)
+        os.environ.pop("CB_SPEAK_COMMAND", None)
+
+        self.addCleanup(setattr, cb.sys, "platform", cb.sys.platform)
+        cb.sys.platform = "linux"
+
+    def test_defaults_to_speech_dispatcher_on_linux(self):
+        self.assertIn("spd-say", cb.speak_command())
+
+    def test_defaults_to_say_on_the_mac(self):
+        cb.sys.platform = "darwin"
+        self.assertTrue(cb.speak_command().startswith("say "))
+
+    def test_an_empty_variable_is_the_default(self):
+        os.environ["CB_SPEAK_COMMAND"] = "  "
+        self.assertIn("spd-say", cb.speak_command())
+
+
+class ServeSpeechTest(unittest.TestCase):
+    """The host half of `say`: text in on a socket, the speech command run
+    with it on stdin, one after another."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = self.tmp.name
+        self.socket = os.path.join(self.dir, "speak.sock")
+        self.out = os.path.join(self.dir, "spoken")
+        self.lock = os.path.join(self.dir, "lock")
+        self.running = True
+
+    def serve(self, command=None):
+        command = command or "cat >> {}; echo >> {}".format(self.out, self.out)
+        listener = cb.unix_listener(self.socket)
+        thread = threading.Thread(
+            target=cb.serve_speech,
+            args=(listener, command, lambda: self.running, self.lock),
+            kwargs={"poll": 0.02},
+        )
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(setattr, self, "running", False)
+        for _ in range(200):
+            if os.path.exists(self.socket):
+                return thread
+            time.sleep(0.01)
+        self.fail("no socket")
+
+    def say(self, data):
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(self.socket)
+        client.sendall(data)
+        client.shutdown(socket.SHUT_WR)
+        client.recv(1)
+        client.close()
+
+    def spoken(self, count):
+        for _ in range(300):
+            if os.path.exists(self.out):
+                lines = open(self.out).read().splitlines()
+                if len(lines) >= count:
+                    return lines
+            time.sleep(0.01)
+        self.fail("nothing spoken")
+
+    def test_speaks_each_message_in_order(self):
+        self.serve()
+        self.say("Hallo Thomas".encode())
+        self.say(b"zweitens")
+        self.assertEqual(self.spoken(2), ["Hallo Thomas", "zweitens"])
+
+    def test_text_never_reaches_a_shell(self):
+        self.serve()
+        self.say(b"$(touch pwned) `touch pwned`; touch pwned")
+        self.spoken(1)
+        self.assertFalse(os.path.exists(os.path.join(os.getcwd(), "pwned")))
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "pwned")))
+
+    def test_cuts_overlong_text(self):
+        self.serve()
+        self.say(b"a" * (cb.SPEAK_MAX_BYTES * 3))
+        self.assertEqual(len(self.spoken(1)[0]), cb.SPEAK_MAX_BYTES)
+
+    def test_skips_blank_messages(self):
+        self.serve()
+        self.say(b"  \n")
+        self.say(b"echt")
+        self.assertEqual(self.spoken(1), ["echt"])
+
+    def test_survives_a_failing_command(self):
+        self.serve(command="read x; [ \"$x\" = boom ] && exit 3; echo \"$x\" >> {}".format(self.out))
+        self.say(b"boom")
+        self.say(b"weiter")
+        self.assertEqual(self.spoken(1), ["weiter"])
+
+    def test_others_can_connect(self):
+        # A rootful docker box is not necessarily the host user.
+        self.serve()
+        self.assertEqual(os.stat(self.socket).st_mode & 0o777, 0o666)
+
+    def test_tcp_listens_on_loopback_only(self):
+        listener = cb.tcp_listener()
+        self.addCleanup(listener.close)
+        self.assertEqual(listener.getsockname()[0], "127.0.0.1")
+        self.assertNotEqual(listener.getsockname()[1], 0)
+
+    def test_removes_the_socket_when_the_box_is_gone(self):
+        thread = self.serve()
+        self.running = False
+        thread.join(5)
+        self.assertFalse(os.path.exists(self.socket))
 
 
 class SshAgentSocketTest(unittest.TestCase):

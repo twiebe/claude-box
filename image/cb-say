@@ -1,0 +1,21 @@
+#!/bin/sh
+# `say` in a claude box: hands the text to the speaker cb runs on the host for
+# a box started with --speak. The arguments are the text, or stdin without any.
+# Returns as soon as the text is delivered; the host says it on its own time.
+#
+# cb tells the box where the speaker is: CB_SPEAK_SOCKET on Linux, a socket in
+# a directory cb mounts; CB_SPEAK_ADDR (host:port) on the Mac, where the box
+# sits in a VM that no socket on the Mac's filesystem reaches.
+
+text() {
+  if [ $# -gt 0 ]; then printf '%s\n' "$*"; else cat; fi
+}
+
+if [ -n "$CB_SPEAK_SOCKET" ] && [ -S "$CB_SPEAK_SOCKET" ]; then
+  text "$@" | nc -N -U "$CB_SPEAK_SOCKET"
+elif [ -n "$CB_SPEAK_ADDR" ]; then
+  text "$@" | nc -N "${CB_SPEAK_ADDR%:*}" "${CB_SPEAK_ADDR##*:}"
+else
+  echo "say: this box cannot speak - start it with cb --speak" >&2
+  exit 1
+fi

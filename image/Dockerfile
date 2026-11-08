@@ -545,8 +545,10 @@ RUN if [ "$WITH_OPENSCAD" = 1 ]; then \
 # a 90-line shell script cost a multi-GB rebuild. Nothing between here and the
 # top needs either file: both are read at container start, never during the
 # build. cb-entry is what cb runs as every box's command; it starts cb-dockerd.
+# cb-say is `say`, which a box started with --speak uses to speak on the host.
 COPY --chmod=0755 cb-dockerd /usr/local/bin/cb-dockerd
 COPY --chmod=0755 cb-entry /usr/local/bin/cb-entry
+COPY --chmod=0755 cb-say /usr/local/bin/say
 
 # claude-code is not in this file. It changes more often than everything above
 # together, and cb installs it from Dockerfile.claude on top of the image this

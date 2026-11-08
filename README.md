@@ -92,6 +92,7 @@ sit at or above the real directory, not above a symlink leading to it.
 | `docker`    | `--docker` / `--no-docker`       | Runs a Docker daemon inside the box, as a privileged container. Needs the `docker` image feature. |
 | `ssh-agent` | `--ssh-agent` / `--no-ssh-agent` | Forwards the host's ssh agent, so `git push` over ssh works. Keys stay in the agent. macOS only.  |
 | `force`     | `--force`                        | Starts even where no tag allows it.                                                              |
+| `speak`     | `--speak` / `--no-speak`         | Lets `say` in the box speak on the host, see [Speech](#speech-cb---speak). Linux and macOS.       |
 
 ```sh
 cb config                  # every setting for this directory, and where its value comes from
@@ -141,6 +142,34 @@ Without an IP the port listens on every interface of the host. Without a host
 port docker picks one, and `docker port <box>` shows which. Remembered ports
 apply to every box of the checkout, so a second box fails on a fixed host port
 the first one holds.
+
+## Speech: `cb --speak`
+
+A box started with `--speak` (or `cb config speak true`) can talk: `say TEXT`,
+or `echo TEXT | say`, inside it speaks on the host. cb forks a small speaker
+for the box before it starts docker, and the speaker ends with the box.
+
+- The text goes to the speech command on stdin and never into a command line,
+  so whatever an agent says is only ever heard. More than 4 KiB is cut.
+- `say` returns once the text is delivered; the host speaks it afterwards.
+  Boxes take turns, so two never talk at once.
+- On Linux the speaker listens on a unix socket under `$XDG_RUNTIME_DIR`,
+  whose directory is mounted at `/run/cb-speak`. On macOS the box runs in a VM
+  no such socket reaches, so the speaker listens on `127.0.0.1` and the box
+  reaches it as `host.docker.internal` (OrbStack and Docker Desktop).
+
+The speech command is a line for `sh` that reads the text on stdin. The
+default is `spd-say --wait --pipe-mode` on Linux and `say -f -` on macOS; set
+`CB_SPEAK_COMMAND` on the host for another voice, for example
+[Piper](https://github.com/OHF-Voice/piper1-gpl):
+
+```sh
+export CB_SPEAK_COMMAND='piper -m ~/.local/share/piper/de_DE-thorsten-high.onnx --output-raw 2>/dev/null | pw-play --raw --format s16 --rate 22050 --channels 1 -'
+```
+
+What the speaker has to say about failures goes to `speak.log` in
+`~/.local/state/claude-box/`. `say` itself is part of the image, so an image
+built before this feature needs a `cb rebuild-image`.
 
 ## Image features: `cb image-config`
 

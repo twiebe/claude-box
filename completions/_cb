@@ -31,7 +31,7 @@ features=(docker ffmpeg go kubernetes openscad pandoc playwright-deps python rus
 if (( CURRENT == 2 )); then
   _describe -t commands 'cb command' subcommands
   _values 'option' '--docker' '--no-docker' '--ssh-agent' '--no-ssh-agent' \
-    '--force' '--dry-run' '--help' \
+    '--speak' '--no-speak' '--force' '--dry-run' '--help' \
     '-v' '--volume' '--port'
   return
 fi
@@ -71,7 +71,7 @@ case "${words[2]}" in
     ;;
   config)
     if (( CURRENT == 3 )); then
-      _values 'setting' 'docker' 'force' 'ssh-agent' '--prune'
+      _values 'setting' 'docker' 'force' 'ssh-agent' 'speak' '--prune'
     elif (( CURRENT == 4 )); then
       _values 'value' 'true' 'false'
     fi

@@ -2,11 +2,14 @@
 """claude-box: a fresh container per run, with Claude Code in it."""
 
 import hashlib
+import fcntl
 import json
 import os
 import re
 import secrets
 import shlex
+import shutil
+import socket
 import subprocess
 import sys
 import urllib.request
@@ -129,6 +132,7 @@ SETTINGS_DEFAULTS = {
     "docker": False,
     "force": False,
     "ssh-agent": False,
+    "speak": False,
 }
 
 
@@ -300,6 +304,8 @@ TOGGLE_FLAGS = {
     "--force": ("force", True),
     "--ssh-agent": ("ssh-agent", True),
     "--no-ssh-agent": ("ssh-agent", False),
+    "--speak": ("speak", True),
+    "--no-speak": ("speak", False),
 }
 SWITCH_FLAGS = {
     "-y": "yes",
@@ -381,6 +387,7 @@ def extract_flags(args):
         "docker": None,
         "force": None,
         "ssh-agent": None,
+        "speak": None,
         "yes": False,
         "dry_run": False,
         "help": False,
@@ -1154,6 +1161,19 @@ BOX_SSH_AUTH_SOCK = "/run/ssh-agent.sock"
 # the VM, so it cannot be checked from here.
 MAC_SSH_AUTH_SOCK = "/run/host-services/ssh-auth.sock"
 
+# Where a box that may speak finds the host's speaker. On Linux that is a
+# directory with the socket in it, mounted rather than the socket itself: a
+# bind mount of a file holds on to its inode, so a socket created anew would no
+# longer be the one the box sees. The `say` in the image reads CB_SPEAK_SOCKET,
+# or CB_SPEAK_ADDR where the speaker listens on TCP instead.
+BOX_SPEAK_DIR = "/run/cb-speak"
+SPEAK_SOCKET = "speak.sock"
+
+# On the Mac the boxes run in a VM, which a socket on the Mac's filesystem does
+# not reach. Docker Desktop and OrbStack both route this name to the Mac's
+# loopback, so there the speaker listens on TCP at 127.0.0.1.
+MAC_HOST_NAME = "host.docker.internal"
+
 def workspace_folder(workspace):
     """Where the checkout is mounted inside the box.
 
@@ -1306,7 +1326,10 @@ def merge_mounts(persistent, per_run):
 def fixed_targets(workspace):
     """Where cb itself mounts something. An extra mount on or around one of
     these would hide it."""
-    return [workspace_folder(workspace), BOX_CLAUDE_DIR, "/commandhistory", PLAYWRIGHT_DIR]
+    return [
+        workspace_folder(workspace), BOX_CLAUDE_DIR, "/commandhistory",
+        PLAYWRIGHT_DIR, BOX_SPEAK_DIR,
+    ]
 
 
 def nested(a, b):
@@ -1512,8 +1535,228 @@ def podman_flags():
     ]
 
 
+# ---------------------------------------------------------------------------
+# Speech
+#
+# `say` in a box speaks on the host. A box started with --speak gets a speaker
+# of its own: a process cb forks off before it hands the terminal to docker,
+# which accepts text and runs the host's speech command with it on stdin. The
+# text never becomes part of a command line, so whatever an agent says is only
+# ever heard.
+#
+# The speaker lives as long as the box. cb execs docker in its own process, so
+# the speaker's parent *is* the box's `docker run`; once that exits, the
+# speaker is reparented and stops. Several boxes take turns through a lock, so
+# two of them never talk over each other.
+# ---------------------------------------------------------------------------
+
+# Reads stdin, and waits until it has been said so the lock means something.
+DEFAULT_SPEAK_COMMANDS = {
+    "linux": "spd-say --wait --pipe-mode >/dev/null",
+    "darwin": "say -f -",
+}
+
+# Enough for a paragraph. More is cut rather than refused: a box that rambles
+# should still be heard, just not for ten minutes.
+SPEAK_MAX_BYTES = 4096
+
+# How long one box gets to deliver its text, and to say it.
+SPEAK_READ_TIMEOUT = 5
+SPEAK_RUN_TIMEOUT = 300
+
+
+def speak_command():
+    """The host's speech command, a line for sh that reads the text on stdin.
+
+    CB_SPEAK_COMMAND, if the host sets it - for a voice of one's own, piper
+    into pw-play for instance - or what the platform has built in.
+    """
+    command = (os.environ.get("CB_SPEAK_COMMAND") or "").strip()
+    if command:
+        return command
+    return DEFAULT_SPEAK_COMMANDS.get(sys.platform, DEFAULT_SPEAK_COMMANDS["linux"])
+
+
+def speak_dir(name):
+    """Where the speaker for the box called `name` puts its socket, or None
+    where it listens on TCP instead.
+
+    Under XDG_RUNTIME_DIR, which only the host user can enter and which goes
+    away with the session, so nothing is left behind by a box that died hard.
+    """
+    if sys.platform == "darwin":
+        return None
+    if not sys.platform.startswith("linux"):
+        raise UsageError(
+            "--speak is only supported on Linux and macOS (this is {})".format(
+                sys.platform
+            )
+        )
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not runtime or not os.path.isdir(runtime):
+        raise UsageError("--speak needs XDG_RUNTIME_DIR, the session's runtime directory")
+    directory = os.path.join(runtime, "claude-box", "speak", name)
+    if len(os.path.join(directory, SPEAK_SOCKET).encode()) > SOCKET_PATH_MAX:
+        raise UsageError(
+            "--speak: the socket path under {} is too long for a unix socket".format(
+                runtime
+            )
+        )
+    return directory
+
+
+# sun_path holds 108 bytes on Linux and 104 on the Mac, terminator included.
+SOCKET_PATH_MAX = 103
+
+
+def speak_lock_path():
+    return os.path.join(state_dir(), "speak.lock")
+
+
+def unix_listener(path):
+    """A socket at `path` anyone may connect to.
+
+    0666 because under rootful docker the box's node need not be the host
+    user. The directory it sits in is what keeps everyone else out.
+    """
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    os.chmod(path, 0o666)
+    listener.listen(8)
+    return listener
+
+
+def tcp_listener():
+    """A socket on the loopback only, on whatever port is free."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    return listener
+
+
+def read_speech(conn):
+    """The text one connection delivers, cut at SPEAK_MAX_BYTES."""
+    conn.settimeout(SPEAK_READ_TIMEOUT)
+    data = b""
+    # Read to the end even past the limit: closing with unread data resets the
+    # connection, and `say` would report an error for text that was spoken.
+    try:
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            if len(data) < SPEAK_MAX_BYTES:
+                data += chunk
+    except OSError:
+        pass
+    return data[:SPEAK_MAX_BYTES].decode("utf-8", "replace").strip()
+
+
+def say_text(text, command, lock_path):
+    """Run `command` with `text` on stdin, one box at a time."""
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            result = subprocess.run(
+                ["sh", "-c", command], input=text.encode(),
+                timeout=SPEAK_RUN_TIMEOUT, check=False,
+            )
+            if result.returncode:
+                print(
+                    "speak: {} exited {}".format(command, result.returncode),
+                    file=sys.stderr,
+                )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print("speak: {}".format(error), file=sys.stderr)
+
+
+def serve_speech(listener, command, alive, lock_path, poll=1.0):
+    """Speak what arrives on `listener` until `alive()` says the box is gone.
+
+    One connection, one message. The connection is closed before the text is
+    said, so `say` in the box returns at once and the agent does not wait for
+    the speech; messages queue in the listener's backlog meanwhile, in order.
+    """
+    listener.settimeout(poll)
+    path = listener.getsockname() if listener.family == socket.AF_UNIX else None
+    try:
+        while alive():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            with conn:
+                text = read_speech(conn)
+            if text:
+                say_text(text, command, lock_path)
+    finally:
+        listener.close()
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def start_speaker(directory, command):
+    """Fork off the speaker for one box, and say where the box finds it.
+
+    Returns ("unix", directory) or ("tcp", "host:port"), as run_argv takes it.
+    The socket exists before this returns, so the box can speak from its first
+    second. The speaker's own output goes to speak.log in the state directory -
+    it has no terminal of its own, and a voice that stays silent is otherwise
+    hard to diagnose.
+    """
+    if DRY_RUN:
+        print("+ speaker: {} <- {}".format(command, directory or "127.0.0.1"))
+        return ("unix", directory) if directory else ("tcp", MAC_HOST_NAME + ":0")
+
+    if directory:
+        os.makedirs(directory, mode=0o755, exist_ok=True)
+        os.chmod(directory, 0o755)
+        path = os.path.join(directory, SPEAK_SOCKET)
+        if os.path.exists(path):
+            os.unlink(path)
+        try:
+            listener = unix_listener(path)
+        except OSError as error:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise CbError("--speak: cannot listen at {}: {}".format(path, error))
+        speaker = ("unix", directory)
+    else:
+        listener = tcp_listener()
+        speaker = ("tcp", "{}:{}".format(MAC_HOST_NAME, listener.getsockname()[1]))
+
+    parent = os.getpid()
+    log = os.path.join(state_dir(), "speak.log")
+    os.makedirs(state_dir(), exist_ok=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.fork():
+        listener.close()
+        return speaker
+
+    # The speaker. Its own session, so a signal to the terminal's process group
+    # is not one to it; it ends when the box does.
+    try:
+        os.setsid()
+        null = os.open(os.devnull, os.O_RDONLY)
+        out = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.dup2(null, 0)
+        os.dup2(out, 1)
+        os.dup2(out, 2)
+        serve_speech(
+            listener, command, lambda: os.getppid() == parent, speak_lock_path()
+        )
+    finally:
+        if directory:
+            shutil.rmtree(directory, ignore_errors=True)
+        os._exit(0)
+
+
 def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
-             agent_socket=None, ports=(), podman=False):
+             agent_socket=None, ports=(), podman=False, speaker=None):
     """The whole of a box, as one `docker run`.
 
     --rm and the command in the foreground: the box lives exactly as long as
@@ -1531,6 +1774,9 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
     None for a box that has no business signing anything.
 
     `ports` are published as they are spelled, see parse_port.
+
+    `speaker` is what start_speaker() returned, or None for a box that stays
+    silent.
 
     `podman` is rootless_podman(), asked for by the caller so this stays free
     of subprocesses.
@@ -1589,12 +1835,18 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
         argv += ["--mount", mount_value(mount)]
     if agent_socket:
         argv += ["--mount", mount_value((agent_socket, BOX_SSH_AUTH_SOCK, False))]
+    if speaker and speaker[0] == "unix":
+        argv += ["--mount", mount_value((speaker[1], BOX_SPEAK_DIR, False))]
     for port in ports:
         argv += ["--publish", format_port(port)]
 
     env = container_env(docker)
     if agent_socket:
         env["SSH_AUTH_SOCK"] = BOX_SSH_AUTH_SOCK
+    if speaker and speaker[0] == "unix":
+        env["CB_SPEAK_SOCKET"] = "{}/{}".format(BOX_SPEAK_DIR, SPEAK_SOCKET)
+    elif speaker:
+        env["CB_SPEAK_ADDR"] = speaker[1]
     for key, value in env.items():
         argv += ["--env", "{}={}".format(key, value)]
 
@@ -1747,14 +1999,22 @@ def start(flags, command):
     mounts = box_mounts(workspace, flags["volumes"])
     ports = box_ports(workspace, flags["ports"])
     agent_socket = ssh_agent_socket() if settings["ssh-agent"][0] else None
+    # One speaker per container, so two boxes of a checkout each get their own.
+    # Named by hash and suffix only: a socket path has room for about a hundred
+    # bytes, and the directory's name would not fit beside the runtime dir.
+    suffix = secrets.token_hex(2)
+    speak = settings["speak"][0]
+    speaker_dir = speak_dir("{}-{}".format(path_hash(workspace), suffix)) if speak else None
     ensure_image()
     check_docker_feature(docker)
     ensure_claude_dir()
     ensure_history_volume(workspace)
+    speaker = start_speaker(speaker_dir, speak_command()) if speak else None
     replace_process(
         run_argv(
-            workspace, docker, mounts, command, agent_socket=agent_socket, ports=ports,
-            podman=rootless_podman(),
+            workspace, docker, mounts, command, suffix=suffix,
+            agent_socket=agent_socket, ports=ports, podman=rootless_podman(),
+            speaker=speaker,
         )
     )
     return 0
@@ -2600,12 +2860,14 @@ options
   --docker, --no-docker    give the box its own docker daemon
   --ssh-agent, --no-ssh-agent
                            hand the box the host's ssh agent (macOS only)
+  --speak, --no-speak      let `say` in the box speak on the host, through
+                           $CB_SPEAK_COMMAND (default: spd-say, say on macOS)
   --force                  allow a box where no tag enables it
   -y                       do not ask
   --dry-run                print the commands instead of running them
   --                       stop reading options; the rest is claude's
 
-  --docker, --ssh-agent and --force apply to this run only;
+  --docker, --ssh-agent, --speak and --force apply to this run only;
   `cb config KEY true|false` keeps them for every run here
 
 image features: {features}
