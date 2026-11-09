@@ -161,10 +161,26 @@ for the box before it starts docker, and the speaker ends with the box.
 The speech command is a line for `sh` that reads the text on stdin. The
 default is `spd-say --wait --pipe-mode` on Linux and `say -f -` on macOS; set
 `CB_SPEAK_COMMAND` on the host for another voice, for example
-[Piper](https://github.com/OHF-Voice/piper1-gpl):
+[Piper](https://github.com/OHF-Voice/piper1-gpl) with the German voice
+Thorsten:
+
+```sh
+python3 -m venv ~/.local/share/piper/venv
+~/.local/share/piper/venv/bin/pip install piper-tts
+~/.local/share/piper/venv/bin/python -m piper.download_voices --data-dir ~/.local/share/piper de_DE-thorsten-high
+ln -s ~/.local/share/piper/venv/bin/piper ~/.local/bin/piper    # or anywhere on PATH
+```
+
+On Linux, streamed to PipeWire:
 
 ```sh
 export CB_SPEAK_COMMAND='piper -m ~/.local/share/piper/de_DE-thorsten-high.onnx --output-raw 2>/dev/null | pw-play --raw --format s16 --rate 22050 --channels 1 -'
+```
+
+On macOS, through a WAV file, since `afplay` cannot read stdin:
+
+```sh
+export CB_SPEAK_COMMAND='d=$(mktemp -d) && piper -m ~/.local/share/piper/de_DE-thorsten-high.onnx -f "$d/say.wav" 2>/dev/null && afplay "$d/say.wav"; rm -rf "$d"'
 ```
 
 Claude does not speak on its own just because it can: the image ships a
