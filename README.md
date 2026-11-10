@@ -186,9 +186,10 @@ export CB_SPEAK_COMMAND='d=$(mktemp -d) && piper -m ~/.local/share/piper/de_DE-t
 Claude does not speak on its own just because it can: the image ships a
 `/speak` skill, and a session talks only after `/speak` (sparse: when done, or
 waiting for you), `/speak chatty` (plus short status updates) - `/speak off`
-ends it. The skill lives in `image/skills/`, which the image copies to
-`/etc/claude-code/.claude/skills/`, so every box has it whatever host it runs
-on.
+ends it. It speaks German, for the German voice, and opens each message with a
+"Huhu, ich bin's wieder." or the like, so the first words are not lost. The skill lives in `image/skills/`,
+which the image copies to `/etc/claude-code/.claude/skills/`, so every box has
+it whatever host it runs on.
 
 What the speaker has to say about failures goes to `speak.log` in
 `~/.local/state/claude-box/`. `say` itself is part of the image, so an image

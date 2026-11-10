@@ -38,7 +38,7 @@ Before turning it on, check that this box can speak:
 If that fails, do not turn it on. Tell the user the box has to be restarted
 with `cb --speak` (or `cb --continue --speak` to keep the conversation).
 
-Otherwise confirm the mode with one short `say`, e.g. "Speech on, sparse."
+Otherwise confirm the mode with one short `say`, e.g. "Huhu, ich bin's. Sprache an, sparsam."
 When turning it off, confirm in text only.
 
 ## The modes
@@ -56,9 +56,27 @@ When turning it off, confirm in text only.
 
 ## How to speak
 
-- In the language the user writes in, one or two short sentences. Everything
-  said is in the terminal anyway - the voice is the nudge, not the report.
+- In German by default, whatever language the user writes in: the host's
+  voice is usually German (Thorsten), and English through it sounds wrong.
+  Speak another language only when the user asks for it.
+- Open every `say` with a short call for attention, its own sentence, then the
+  message. Said straight away, the first words go by before anyone listens.
+  Vary the opener, a little wink is welcome, for example:
+  - "Hallo, ich wieder."
+  - "Huhu, ich bin's wieder."
+  - "So, da bin ich wieder."
+  - "Hallo, ich hab hier was für dich."
+  - "Kurze Durchsage."
+  - "Psst, kurz mal herhören."
+  - "Klopf, klopf."
+  - "Tadaa."
+  - "Hach, du schon wieder? Ach nein, ich."
+  - "Entschuldige die Störung."
+  Pick one that fits: something cheerful for good news, something gentler for
+  a problem or a question. Not the same one twice in a row.
+- One or two short sentences after that. Everything said is in the terminal
+  anyway - the voice is the nudge, not the report.
 - Nothing that sounds bad read aloud: no code, paths, hashes, URLs, tables or
-  lists. "The tests pass" rather than "358 tests OK in 0.19s".
+  lists. "Die Tests laufen durch" rather than "358 tests OK in 0.19s".
 - No secrets, tokens or passwords - the room is listening.
 - One `say` per occasion, not several in a row.
