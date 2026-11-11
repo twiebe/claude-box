@@ -191,6 +191,20 @@ ends it. It speaks German, for the German voice, and opens each message with a
 which the image copies to `/etc/claude-code/.claude/skills/`, so every box has
 it whatever host it runs on.
 
+For a meeting, `cb speech` on the host quiets every box at once, the running
+ones included:
+
+```sh
+cb speech pause 30m    # quiet for 30 minutes from now (2h, 1h30m, 90s, 45 = minutes)
+cb speech off          # quiet until `cb speech on`
+cb speech on
+cb speech              # on, off, or paused until when
+```
+
+A new pause replaces the one before, counted from now. What a box says
+meanwhile is dropped, not saved up for later. The switch is `speech.json` in
+`~/.local/state/claude-box/`, which the speakers read before each message.
+
 What the speaker has to say about failures goes to `speak.log` in
 `~/.local/state/claude-box/`. `say` itself is part of the image, so an image
 built before this feature needs a `cb rebuild-image`.

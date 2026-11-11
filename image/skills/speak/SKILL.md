@@ -17,6 +17,11 @@ echo "One short sentence." | say
 `say` returns at once; the host speaks afterwards. Exit 0 means delivered, not
 heard - only the user knows whether it came through.
 
+The user can quiet every box from the host with `cb speech off` or
+`cb speech pause 30m`, in a meeting say. `say` cannot tell: it still exits 0
+and the text is dropped. Do not retry, and do not repeat it later - whatever
+was said is in the terminal anyway.
+
 ## Setting the mode
 
 The default is **off**: without this command a session never speaks on its

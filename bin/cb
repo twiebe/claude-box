@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.request
 
 # The Dockerfiles live in image/ next to bin/, wherever the checkout is. realpath
@@ -280,6 +281,7 @@ SUBCOMMANDS = (
     "untag",
     "enabled",
     "mv",
+    "speech",
 )
 
 # Gone with the long-lived boxes. Without this they would reach claude as a
@@ -1613,6 +1615,101 @@ def speak_lock_path():
     return os.path.join(state_dir(), "speak.lock")
 
 
+# `cb speech off|pause|on` - one switch for every box of the host, for a
+# meeting, say. The speakers read it before each message, so it applies to
+# boxes already running, and what arrives while it is off is dropped rather
+# than saved up for later.
+def speech_state_path():
+    return os.path.join(state_dir(), "speech.json")
+
+
+def speech_quiet_until(path, now=None):
+    """Until when speech is off: None while it is on, inf for `cb speech off`,
+    the end of the pause otherwise. A pause that is over counts as on."""
+    state = read_json(path)
+    if state.get("off") is True:
+        return float("inf")
+    until = state.get("until")
+    if isinstance(until, (int, float)) and not isinstance(until, bool):
+        if until > (time.time() if now is None else now):
+            return until
+    return None
+
+
+DURATION_UNITS = {"h": 3600, "m": 60, "s": 1}
+
+
+def parse_duration(text):
+    """Seconds in "30m", "2h", "1h30m" or "90s"; a bare number is minutes."""
+    text = text.strip().lower()
+    if text.isdigit():
+        seconds = int(text) * 60
+    else:
+        parts = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", text)
+        if not text or not parts:
+            raise UsageError(
+                "cb speech pause: not a duration: {!r} (try 30m, 2h, 1h30m)".format(text)
+            )
+        seconds = sum(
+            int(value) * DURATION_UNITS[unit]
+            for value, unit in zip(parts.groups(), "hms") if value
+        )
+    if seconds <= 0:
+        raise UsageError("cb speech pause: the pause has to be longer than nothing")
+    return seconds
+
+
+def format_left(seconds):
+    minutes = max(1, int(round(seconds / 60.0)))
+    if minutes < 60:
+        return "{}m".format(minutes)
+    return "{}h{:02d}m".format(minutes // 60, minutes % 60)
+
+
+def speech_status(path, now=None):
+    now = time.time() if now is None else now
+    until = speech_quiet_until(path, now)
+    if until is None:
+        return "speech: on"
+    if until == float("inf"):
+        return "speech: off, until `cb speech on`"
+    return "speech: paused until {} ({} left)".format(
+        time.strftime("%H:%M", time.localtime(until)), format_left(until - now)
+    )
+
+
+def cmd_speech(flags, args):
+    """`cb speech [on|off|pause DURATION]`: the host-wide switch for `say`.
+
+    A pause counts from now, and a new one replaces the one before, whether
+    that ends sooner or later.
+    """
+    path = speech_state_path()
+    if not args:
+        print(speech_status(path))
+        return 0
+    action, rest = args[0], args[1:]
+    if action == "on":
+        reject_extra("speech on", rest)
+        if os.path.exists(path):
+            remove_file(path)
+    elif action == "off":
+        reject_extra("speech off", rest)
+        write_json(path, {"off": True})
+    elif action == "pause":
+        if not rest:
+            raise UsageError("cb speech pause: how long? e.g. cb speech pause 30m")
+        reject_extra("speech pause", rest[1:])
+        write_json(path, {"until": time.time() + parse_duration(rest[0])})
+    else:
+        raise UsageError(
+            "cb speech: {!r} is not on, off or pause DURATION".format(action)
+        )
+    if not DRY_RUN:
+        print(speech_status(path))
+    return 0
+
+
 def unix_listener(path):
     """A socket at `path` anyone may connect to.
 
@@ -1652,11 +1749,16 @@ def read_speech(conn):
     return data[:SPEAK_MAX_BYTES].decode("utf-8", "replace").strip()
 
 
-def say_text(text, command, lock_path):
-    """Run `command` with `text` on stdin, one box at a time."""
+def say_text(text, command, lock_path, quiet_path=None):
+    """Run `command` with `text` on stdin, one box at a time - unless `cb
+    speech` has turned speech off, which is asked once it is this box's turn,
+    so nothing queued behind a long message slips through either."""
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     with open(lock_path, "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if quiet_path and speech_quiet_until(quiet_path) is not None:
+            print("speak: speech is off, dropped {} bytes".format(len(text.encode())))
+            return
         try:
             result = subprocess.run(
                 ["sh", "-c", command], input=text.encode(),
@@ -1671,7 +1773,7 @@ def say_text(text, command, lock_path):
             print("speak: {}".format(error), file=sys.stderr)
 
 
-def serve_speech(listener, command, alive, lock_path, poll=1.0):
+def serve_speech(listener, command, alive, lock_path, quiet_path=None, poll=1.0):
     """Speak what arrives on `listener` until `alive()` says the box is gone.
 
     One connection, one message. The connection is closed before the text is
@@ -1689,7 +1791,7 @@ def serve_speech(listener, command, alive, lock_path, poll=1.0):
             with conn:
                 text = read_speech(conn)
             if text:
-                say_text(text, command, lock_path)
+                say_text(text, command, lock_path, quiet_path)
     finally:
         listener.close()
         if path:
@@ -1747,7 +1849,8 @@ def start_speaker(directory, command):
         os.dup2(out, 1)
         os.dup2(out, 2)
         serve_speech(
-            listener, command, lambda: os.getppid() == parent, speak_lock_path()
+            listener, command, lambda: os.getppid() == parent, speak_lock_path(),
+            speech_state_path(),
         )
     finally:
         if directory:
@@ -2850,6 +2953,9 @@ USAGE = """usage: cb [command] [options]
   cb enabled [DIR]         whether a box may start in DIR, and why
   cb mv SRC DST            move a directory along with its settings, mounts,
                            shell history and Claude history
+  cb speech [on|off|pause DURATION]
+                           speech of every box on this host: on, off, or off
+                           for a while (30m, 2h, 1h30m) counted from now
 
 options
   -v, --volume SRC[:DST][:ro]
@@ -2900,6 +3006,7 @@ COMMANDS = {
     "untag": cmd_untag,
     "enabled": cmd_enabled,
     "mv": cmd_mv,
+    "speech": cmd_speech,
 }
 
 

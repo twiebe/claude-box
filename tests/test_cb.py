@@ -1704,12 +1704,12 @@ class ServeSpeechTest(unittest.TestCase):
         self.lock = os.path.join(self.dir, "lock")
         self.running = True
 
-    def serve(self, command=None):
+    def serve(self, command=None, quiet=None):
         command = command or "cat >> {}; echo >> {}".format(self.out, self.out)
         listener = cb.unix_listener(self.socket)
         thread = threading.Thread(
             target=cb.serve_speech,
-            args=(listener, command, lambda: self.running, self.lock),
+            args=(listener, command, lambda: self.running, self.lock, quiet),
             kwargs={"poll": 0.02},
         )
         thread.start()
@@ -1784,6 +1784,88 @@ class ServeSpeechTest(unittest.TestCase):
         self.running = False
         thread.join(5)
         self.assertFalse(os.path.exists(self.socket))
+
+    def test_drops_what_arrives_while_speech_is_off(self):
+        quiet = os.path.join(self.dir, "speech.json")
+        cb.write_json(quiet, {"off": True})
+        self.serve(quiet=quiet)
+        self.say(b"im Meeting nicht")
+        time.sleep(0.2)
+        os.remove(quiet)
+        self.say(b"jetzt wieder")
+        self.assertEqual(self.spoken(1), ["jetzt wieder"])
+
+
+class SpeechSwitchTest(unittest.TestCase):
+    """`cb speech`: one file in the state directory that every speaker reads
+    before it speaks."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(os.environ.pop, "XDG_STATE_HOME", None)
+        os.environ["XDG_STATE_HOME"] = self.tmp.name
+        self.path = cb.speech_state_path()
+        os.makedirs(os.path.dirname(self.path))
+
+    def speech(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cb.cmd_speech({}, list(args)), 0)
+        return out.getvalue().strip()
+
+    def test_on_without_any_file(self):
+        self.assertIsNone(cb.speech_quiet_until(self.path))
+        self.assertEqual(self.speech(), "speech: on")
+
+    def test_off_holds_until_on(self):
+        self.assertIn("off", self.speech("off"))
+        self.assertEqual(cb.speech_quiet_until(self.path, now=1e12), float("inf"))
+        self.assertEqual(self.speech("on"), "speech: on")
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_pause_counts_from_now(self):
+        before = time.time()
+        self.assertIn("paused until", self.speech("pause", "30m"))
+        until = cb.speech_quiet_until(self.path)
+        self.assertGreaterEqual(until, before + 1800)
+        self.assertLessEqual(until, time.time() + 1800)
+
+    def test_a_new_pause_replaces_the_old_one_even_if_shorter(self):
+        self.speech("pause", "2h")
+        self.speech("pause", "5m")
+        self.assertLessEqual(cb.speech_quiet_until(self.path), time.time() + 300)
+
+    def test_a_pause_that_is_over_is_on(self):
+        cb.write_json(self.path, {"until": time.time() - 1})
+        self.assertIsNone(cb.speech_quiet_until(self.path))
+        self.assertEqual(self.speech(), "speech: on")
+
+    def test_a_broken_file_is_on(self):
+        with open(self.path, "w") as handle:
+            handle.write("{nope")
+        self.assertIsNone(cb.speech_quiet_until(self.path))
+
+    def test_durations(self):
+        for text, seconds in [("30m", 1800), ("2h", 7200), ("1h30m", 5400),
+                              ("90s", 90), ("45", 2700), ("1H", 3600)]:
+            self.assertEqual(cb.parse_duration(text), seconds, text)
+
+    def test_bad_durations_are_refused(self):
+        for text in ["", "m", "0m", "soon", "1d", "-5m", "30 m"]:
+            with self.assertRaises(cb.UsageError, msg=text):
+                cb.parse_duration(text)
+
+    def test_pause_needs_a_duration(self):
+        with self.assertRaises(cb.UsageError):
+            cb.cmd_speech({}, ["pause"])
+
+    def test_unknown_action_is_refused(self):
+        with self.assertRaises(cb.UsageError):
+            cb.cmd_speech({}, ["leise"])
+
+    def test_is_a_subcommand(self):
+        self.assertEqual(cb.pick_subcommand(["speech", "off"])[0], "speech")
 
 
 class SshAgentSocketTest(unittest.TestCase):

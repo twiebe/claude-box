@@ -25,6 +25,7 @@ subcommands=(
   'untag:remove a directory'"'"'s tag again'
   'enabled:whether a box may start in a directory'
   'mv:move a directory along with what cb keeps about it'
+  'speech:turn speech of every box on, off, or pause it'
 )
 features=(docker ffmpeg go kubernetes openscad pandoc playwright-deps python rust sqlx tofu)
 
@@ -61,6 +62,9 @@ case "${words[2]}" in
     elif [[ "${words[3]}" == add ]]; then
       _directories
     fi
+    ;;
+  speech)
+    (( CURRENT == 3 )) && _values 'action' 'on' 'off' 'pause'
     ;;
   port)
     (( CURRENT == 3 )) && _values 'action' 'add' 'rm' 'ls'
