@@ -223,6 +223,84 @@ class ResolveSettingsTest(unittest.TestCase):
         resolved = cb.resolve_settings(stored={"dind": True}, overrides={})
         self.assertNotIn("dind", resolved)
 
+    def test_global_value_wins_over_the_default(self):
+        resolved = cb.resolve_settings({}, {}, global_stored={"speak": True})
+        self.assertEqual(resolved["speak"], (True, "global"))
+
+    def test_directory_value_wins_over_the_global_one(self):
+        resolved = cb.resolve_settings(
+            {"speak": False}, {}, global_stored={"speak": True}
+        )
+        self.assertEqual(resolved["speak"], (False, "file"))
+
+    def test_flag_wins_over_the_global_value(self):
+        resolved = cb.resolve_settings(
+            {}, {"speak": False}, global_stored={"speak": True}
+        )
+        self.assertEqual(resolved["speak"], (False, "flag"))
+
+
+class GlobalConfigTest(unittest.TestCase):
+    """`cb config --global` sets what every directory gets unless it says
+    otherwise."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.workspace = str(base / "repo")
+        os.makedirs(self.workspace)
+        state = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(base / "state")
+        self.addCleanup(
+            lambda: os.environ.pop("XDG_STATE_HOME")
+            if state is None
+            else os.environ.__setitem__("XDG_STATE_HOME", state)
+        )
+        self.addCleanup(setattr, cb, "current_workspace", cb.current_workspace)
+        cb.current_workspace = lambda: self.workspace
+
+    def config(self, *args):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb.cmd_config({}, list(args))
+        return out.getvalue()
+
+    def test_set_writes_the_global_file(self):
+        self.config("--global", "speak", "true")
+        self.assertIs(cb.load_settings(cb.global_settings_path())["speak"], True)
+        self.assertFalse(os.path.exists(cb.settings_path(self.workspace)))
+
+    def test_a_directory_without_its_own_value_gets_the_global_one(self):
+        self.config("--global", "speak", "true")
+        self.assertIn("speak true (global)", self.config("speak"))
+        self.assertEqual(cb.box_settings(self.workspace, {
+            key: None for key in cb.SETTINGS_DEFAULTS
+        })["speak"], (True, "global"))
+
+    def test_a_directory_value_beats_the_global_one(self):
+        self.config("--global", "speak", "true")
+        self.config("speak", "false")
+        self.assertIn("speak false (file)", self.config("speak"))
+
+    def test_global_show_ignores_the_directory(self):
+        self.config("speak", "true")
+        self.assertIn("speak false (default)", self.config("--global", "speak"))
+
+    def test_global_listing_shows_every_setting(self):
+        self.config("--global", "docker", "true")
+        out = self.config("--global")
+        self.assertRegex(out, r"docker\s+true\s+\(global\)")
+        self.assertRegex(out, r"speak\s+false\s+\(default\)")
+
+    def test_the_directory_listing_shows_global_values(self):
+        self.config("--global", "speak", "true")
+        self.assertRegex(self.config(), r"speak\s+true\s+\(global\)")
+
+    def test_global_refuses_prune(self):
+        with self.assertRaises(cb.UsageError):
+            self.config("--global", "--prune")
+
 
 class SettingsRoundTripTest(unittest.TestCase):
     def setUp(self):

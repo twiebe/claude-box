@@ -183,6 +183,12 @@ def settings_path(path):
     return os.path.join(state_dir(), "projects", container_name(path) + ".json")
 
 
+def global_settings_path():
+    """Where `cb config --global` keeps what every directory gets unless its
+    own settings say otherwise."""
+    return os.path.join(state_dir(), "settings.json")
+
+
 def load_settings(path):
     """Stored settings, or {} if there are none to be had.
 
@@ -238,19 +244,23 @@ def adopt_settings():
         print("settings: {} -> {}".format(spelled, real), file=sys.stderr)
 
 
-def resolve_settings(stored, overrides):
+def resolve_settings(stored, overrides, global_stored=None):
     """Effective settings as {key: (value, source)}.
 
+    Flag beats the directory's file beats the global file beats the default.
     The source is what `cb config` prints, and the reason this returns pairs
     rather than plain values: "docker true" is not actionable, "docker true
     (flag)" tells you the file still says something else.
     """
+    global_stored = global_stored or {}
     resolved = {}
     for key, default in SETTINGS_DEFAULTS.items():
         if overrides.get(key) is not None:
             resolved[key] = (overrides[key], "flag")
         elif key in stored:
             resolved[key] = (stored[key], "file")
+        elif key in global_stored:
+            resolved[key] = (global_stored[key], "global")
         else:
             resolved[key] = (default, "default")
     return resolved
@@ -2019,7 +2029,7 @@ def box_settings(workspace, flags):
     on top. Nothing is written back - that is `cb config`'s job."""
     overrides = {key: flags[key] for key in SETTINGS_DEFAULTS}
     stored = load_settings(settings_path(workspace))
-    return resolve_settings(stored, overrides)
+    return resolve_settings(stored, overrides, load_settings(global_settings_path()))
 
 
 def stored_mounts(stored):
@@ -2224,6 +2234,8 @@ def cmd_exec(args):
 
 
 def cmd_config(flags, args):
+    if "--global" in args:
+        return global_config([arg for arg in args if arg != "--global"])
     if args == ["--prune"]:
         return prune_settings()
     if len(args) == 2:
@@ -2233,7 +2245,7 @@ def cmd_config(flags, args):
     reject_extra("config", args)
 
     workspace = current_workspace()
-    settings = resolve_settings(load_settings(settings_path(workspace)), {})
+    settings = directory_settings(workspace)
     for key in sorted(settings):
         value, source = settings[key]
         print("{:<9} {:<6} ({})".format(key, str(value).lower(), source))
@@ -2327,9 +2339,42 @@ def set_feature(stored, feature, value):
     return 0
 
 
-def show_setting(key):
-    workspace = current_workspace()
-    settings = resolve_settings(load_settings(settings_path(workspace)), {})
+def directory_settings(workspace):
+    """What a box in `workspace` gets without flags: its own file over the
+    global one over the defaults."""
+    return resolve_settings(
+        load_settings(settings_path(workspace)),
+        {},
+        load_settings(global_settings_path()),
+    )
+
+
+def global_settings():
+    """The global file over the defaults, which is what a directory without
+    settings of its own gets."""
+    return resolve_settings({}, {}, load_settings(global_settings_path()))
+
+
+def global_config(args):
+    """`cb config --global [KEY [VALUE]]`, the same as for a directory but
+    for every directory at once."""
+    if len(args) == 2:
+        return set_setting(args[0], args[1], scope="global")
+    if len(args) == 1 and not args[0].startswith("-"):
+        return show_setting(args[0], scope="global")
+    reject_extra("config --global", args)
+    settings = global_settings()
+    for key in sorted(settings):
+        value, source = settings[key]
+        print("{:<9} {:<6} ({})".format(key, str(value).lower(), source))
+    return 0
+
+
+def show_setting(key, scope="directory"):
+    if scope == "global":
+        settings = global_settings()
+    else:
+        settings = directory_settings(current_workspace())
     if key not in settings:
         raise UsageError(
             "unknown setting: {} (known: {})".format(
@@ -2341,7 +2386,7 @@ def show_setting(key):
     return 0
 
 
-def set_setting(key, value):
+def set_setting(key, value, scope="directory"):
     if key == "mounts":
         raise UsageError("mounts are set with `cb mount add|rm`")
     if key == "ports":
@@ -2354,6 +2399,14 @@ def set_setting(key, value):
         )
     if value not in ("true", "false"):
         raise UsageError("{} takes true or false, not {}".format(key, value))
+    if scope == "global":
+        path = global_settings_path()
+        stored = load_settings(path)
+        stored["version"] = SETTINGS_VERSION
+        stored[key] = value == "true"
+        write_json(path, stored)
+        print("{} {} ({})".format(key, value, path))
+        return 0
     workspace = current_workspace()
     save_settings(settings_path(workspace), {key: value == "true"}, workspace)
     print("{} {} ({})".format(key, value, settings_path(workspace)))
@@ -2943,6 +2996,8 @@ USAGE = """usage: cb [command] [options]
   cb image-config [FEATURE [true|false]]
                            toolchains the next rebuild-image includes
   cb config [KEY [VALUE]] [--prune]
+  cb config --global [KEY [VALUE]]
+                           defaults for every directory without its own value
   cb volume prune playwright
                            empty the browser cache every box shares
   cb volume prune all      that, plus the shell history of checkouts that are gone

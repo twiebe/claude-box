@@ -80,7 +80,10 @@ this directory.
 
 Each directory has its own settings, stored under
 `~/.local/state/claude-box/projects/`. A flag applies to that run only;
-`cb config` makes it stick. Flag beats stored setting beats default (all off).
+`cb config` makes it stick. `cb config --global` sets a default for every
+directory that has no value of its own, stored in
+`~/.local/state/claude-box/settings.json`. Flag beats directory setting beats
+global setting beats default (all off).
 
 A directory is identified by its real path, with every symlink resolved, so
 `/home/you/repo` and `/var/home/you/repo` on Fedora Atomic desktops are one box
@@ -99,7 +102,12 @@ cb config                  # every setting for this directory, and where its val
 cb config docker           # one setting
 cb config docker true      # remember it
 cb config --prune          # drop settings of directories that no longer exist
+cb config --global         # the global defaults, and where each comes from
+cb config --global speak true   # every directory speaks unless it says otherwise
 ```
+
+A global `force true` turns off the directory gate everywhere, like
+`cb enable all /` would.
 
 `cb config` also shows how many mounts and ports are remembered, and which
 features and tool versions the current image was built with.
@@ -145,8 +153,9 @@ the first one holds.
 
 ## Speech: `cb --speak`
 
-A box started with `--speak` (or `cb config speak true`) can talk: `say TEXT`,
-or `echo TEXT | say`, inside it speaks on the host. cb forks a small speaker
+A box started with `--speak` (or `cb config speak true`, or
+`cb config --global speak true` for every box) can talk: `say TEXT`, or
+`echo TEXT | say`, inside it speaks on the host. cb forks a small speaker
 for the box before it starts docker, and the speaker ends with the box.
 
 - The text goes to the speech command on stdin and never into a command line,

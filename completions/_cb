@@ -74,9 +74,13 @@ case "${words[2]}" in
       ${^features/#/--with-} ${^features/#/--without-}
     ;;
   config)
+    local -i at=3
+    [[ $words[3] == --global ]] && at=4
     if (( CURRENT == 3 )); then
-      _values 'setting' 'docker' 'force' 'ssh-agent' 'speak' '--prune'
-    elif (( CURRENT == 4 )); then
+      _values 'setting' 'docker' 'force' 'ssh-agent' 'speak' '--prune' '--global'
+    elif (( CURRENT == at )); then
+      _values 'setting' 'docker' 'force' 'ssh-agent' 'speak'
+    elif (( CURRENT == at + 1 )); then
       _values 'value' 'true' 'false'
     fi
     ;;
