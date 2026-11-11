@@ -2067,6 +2067,70 @@ class MountCommandTest(unittest.TestCase):
         self.mount("add", "../lib")
         self.assertIs(cb.load_settings(self.settings)["docker"], True)
 
+    def test_add_takes_several_specs(self):
+        other = os.path.join(self.root, "other")
+        os.mkdir(other)
+        self.mount("add", "../lib", "../other:/mnt/other")
+        self.assertEqual(
+            self.stored(),
+            [(self.lib, "/workspaces/lib", False), (other, "/mnt/other", False)],
+        )
+
+    def test_add_ro_flag_applies_to_every_spec(self):
+        self.mount("add", "--ro", "../lib", "../lib:/mnt/lib")
+        self.assertEqual(
+            self.stored(),
+            [(self.lib, "/workspaces/lib", True), (self.lib, "/mnt/lib", True)],
+        )
+
+    def test_add_stores_nothing_if_one_spec_fails(self):
+        with self.assertRaises(cb.CbError):
+            self.mount("add", "../lib", "../nope")
+        self.assertEqual(self.stored(), [])
+
+    def test_add_refuses_two_specs_on_one_target(self):
+        with self.assertRaises(cb.UsageError):
+            self.mount("add", "../lib", self.tmp.name + ":/workspaces/lib")
+        self.assertEqual(self.stored(), [])
+
+    def test_rm_takes_several(self):
+        other = os.path.join(self.root, "other")
+        os.mkdir(other)
+        self.mount("add", "../lib", "../other")
+        self.mount("rm", "../lib", "/workspaces/other")
+        self.assertEqual(self.stored(), [])
+
+    def test_rm_removes_nothing_if_one_is_unknown(self):
+        self.mount("add", "../lib")
+        with self.assertRaises(cb.CbError):
+            self.mount("rm", "../lib", "/nothing")
+        self.assertEqual(self.stored(), [(self.lib, "/workspaces/lib", False)])
+
+    def test_add_and_rm_need_an_argument(self):
+        for action in ("add", "rm"):
+            with self.assertRaises(cb.UsageError):
+                self.mount(action)
+
+    def test_prune_removes_every_mount(self):
+        other = os.path.join(self.root, "other")
+        os.mkdir(other)
+        self.mount("add", "../lib", "../other")
+        self.mount("prune")
+        self.assertEqual(self.stored(), [])
+
+    def test_prune_keeps_other_settings(self):
+        cb.save_settings(self.settings, {"docker": True}, self.workspace)
+        self.mount("add", "../lib")
+        self.mount("prune")
+        self.assertIs(cb.load_settings(self.settings)["docker"], True)
+
+    def test_prune_without_mounts_says_so(self):
+        self.assertIn("no mounts", self.mount("prune"))
+
+    def test_prune_takes_no_arguments(self):
+        with self.assertRaises(cb.UsageError):
+            self.mount("prune", "../lib")
+
     def test_unknown_action(self):
         with self.assertRaises(cb.UsageError):
             self.mount("purge")

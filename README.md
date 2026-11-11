@@ -123,8 +123,11 @@ cb -v ../shared-lib                      # this run only
 cb mount add ../shared-lib               # every run started here
 cb mount add --ro ~/datasets/big         # read-only
 cb mount add ~/notes:/notes              # at an explicit path in the box
+cb mount add ../lib-a ../lib-b           # several at once
 cb mount ls
 cb mount rm ../shared-lib                # by source or by target
+cb mount rm ../lib-a /workspaces/lib-b   # several at once
+cb mount prune                           # forget every mount of this directory
 ```
 
 The spec is `SRC[:DST][:ro]`, close to docker's `-v`. Relative sources are
@@ -132,6 +135,8 @@ resolved against the current directory. Without `DST` a mount lands at
 `/workspaces/<name of SRC>` - the path it would have in its own box, so
 Claude's per-project state lines up between the two. A `-v` on a remembered
 target replaces that mount for one run, for example to make it read-only once.
+`add` and `rm` with several arguments change all of them or, if one fails,
+none; `add --ro` makes every one of them read-only.
 
 ## Published ports: `cb port` and `--port`
 

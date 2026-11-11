@@ -2435,7 +2435,8 @@ def prune_settings():
 
 
 MOUNT_USAGE = (
-    "usage: cb mount add [--ro] SRC[:DST][:ro] | cb mount rm SRC|DST | cb mount ls"
+    "usage: cb mount add [--ro] SRC[:DST][:ro]... | cb mount rm SRC|DST... "
+    "| cb mount ls | cb mount prune"
 )
 
 
@@ -2445,8 +2446,10 @@ def cmd_mount(flags, args):
     Stored as normalised spec strings next to docker and force, so the settings
     file stays readable and hand-editable.
 
+    `add` and `rm` take several arguments and store all of them or none: a
+    half-done change would leave the agent with mounts nobody asked for.
     `add --ro` is the spec's :ro without having to spell out DST, wherever on
-    the line it is given.
+    the line it is given, and applies to every spec. `prune` forgets them all.
     """
     readonly = bool(args) and args[0] == "add" and "--ro" in args
     if readonly:
@@ -2460,23 +2463,37 @@ def cmd_mount(flags, args):
             print("{}  {}  {}".format(source, target, "ro" if readonly else "rw"))
         return 0
 
-    if len(args) == 2 and args[0] == "add":
-        mount = parse_mount(args[1], workspace)
-        if readonly:
-            if args[1].endswith(":rw"):
-                raise UsageError("--ro contradicts {}".format(args[1]))
-            mount = mount[:2] + (True,)
-        if any(existing[1] == mount[1] for existing in current):
-            raise UsageError("something is already mounted at " + mount[1])
-        check_targets([mount], fixed_targets(workspace))
-        require_sources([mount])
-        updated = current + [mount]
-    elif len(args) == 2 and args[0] == "rm":
-        # A target is a path in the box, which the host's symlinks say nothing about.
-        source, target = resolve_path(args[1], workspace), os.path.normpath(args[1])
-        updated = [m for m in current if m[0] != source and m[1] != target]
-        if len(updated) == len(current):
-            raise CbError("no mount for " + args[1])
+    if args == ["prune"]:
+        if not current:
+            print("no mounts ({})".format(path))
+            return 0
+        for mount in current:
+            print("removed " + format_mount(mount))
+        updated = []
+    elif len(args) >= 2 and args[0] == "add":
+        added = []
+        for spec in args[1:]:
+            mount = parse_mount(spec, workspace)
+            if readonly:
+                if spec.endswith(":rw"):
+                    raise UsageError("--ro contradicts {}".format(spec))
+                mount = mount[:2] + (True,)
+            if any(existing[1] == mount[1] for existing in current + added):
+                raise UsageError("something is already mounted at " + mount[1])
+            added.append(mount)
+        check_targets(added, fixed_targets(workspace))
+        require_sources(added)
+        updated = current + added
+    elif len(args) >= 2 and args[0] == "rm":
+        updated = current
+        for arg in args[1:]:
+            # A target is a path in the box, which the host's symlinks say
+            # nothing about.
+            source, target = resolve_path(arg, workspace), os.path.normpath(arg)
+            kept = [m for m in updated if m[0] != source and m[1] != target]
+            if len(kept) == len(updated):
+                raise CbError("no mount for " + arg)
+            updated = kept
     else:
         raise UsageError(MOUNT_USAGE)
 
@@ -2985,9 +3002,10 @@ USAGE = """usage: cb [command] [options]
   cb exec [-n NAME] CMD…   run CMD in a running box of this directory, or the
                            one called NAME (full name or its last 4 characters)
   cb ls [DIR]              running boxes, all or those of DIR
-  cb mount add [--ro] SRC[:DST][:ro]
-  cb mount rm SRC|DST
+  cb mount add [--ro] SRC[:DST][:ro]...
+  cb mount rm SRC|DST...
   cb mount ls              mounts every run in this directory gets
+  cb mount prune           forget every mount of this directory
   cb port add [IP:][HOST:]CONTAINER[/PROTO]
   cb port rm SPEC|HOST
   cb port ls               ports every run in this directory publishes
