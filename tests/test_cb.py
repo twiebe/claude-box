@@ -669,8 +669,18 @@ class ParseVersionTest(unittest.TestCase):
         self.assertEqual(cb.parse_github_release({"tag_name": "v1.37.1"}), "1.37.1")
         self.assertIn("kubectl", cb.TOOLCHAINS)
 
+    def test_reads_task_from_the_go_module_proxy(self):
+        payload = {"Version": "v3.54.0", "Time": "2026-10-01T20:21:39Z"}
+        self.assertEqual(cb.parse_go_proxy_version(payload), "3.54.0")
+        self.assertIn("task", cb.TOOLCHAINS)
+
     def test_nothing_arrived(self):
-        for parse in (cb.parse_uv_version, cb.parse_go_version, cb.parse_github_release):
+        for parse in (
+            cb.parse_uv_version,
+            cb.parse_go_version,
+            cb.parse_go_proxy_version,
+            cb.parse_github_release,
+        ):
             self.assertIsNone(parse(None))
 
     def test_something_unexpected_arrived(self):
@@ -681,6 +691,7 @@ class ParseVersionTest(unittest.TestCase):
             (cb.parse_go_version, []),
             (cb.parse_go_version, [{"stable": False}]),
             (cb.parse_github_release, {"tag_name": ""}),
+            (cb.parse_go_proxy_version, {"Version": ""}),
         ):
             self.assertIsNone(parse(junk))
 

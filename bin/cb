@@ -839,7 +839,7 @@ def claude_version():
 #
 # Each lookup is the plainest unauthenticated endpoint its project publishes, and
 # each returns None rather than raising: the Dockerfile's own pin is the fallback
-# and a build must not depend on four third parties being up.
+# and a build must not depend on five third parties being up.
 # ---------------------------------------------------------------------------
 
 
@@ -866,6 +866,15 @@ def parse_go_version(payload):
     return None
 
 
+def parse_go_proxy_version(payload):
+    """The module proxy's @latest, as "v3.54.0". go-task is built from the
+    proxy, so that is the version to ask it for."""
+    try:
+        return payload["Version"].lstrip("v") or None
+    except (TypeError, KeyError, AttributeError):
+        return None
+
+
 def parse_github_release(payload):
     """GitHub's latest release, which excludes drafts and pre-releases.
 
@@ -887,6 +896,11 @@ TOOLCHAINS = {
         "KUBECTL_VERSION",
         "https://api.github.com/repos/kubernetes/kubernetes/releases/latest",
         parse_github_release,
+    ),
+    "task": (
+        "TASK_VERSION",
+        "https://proxy.golang.org/github.com/go-task/task/v3/@latest",
+        parse_go_proxy_version,
     ),
     "tofu": (
         "TOFU_VERSION",

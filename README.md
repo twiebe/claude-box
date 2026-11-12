@@ -15,8 +15,8 @@ What survives a run lives outside the container:
 - **Playwright browsers** are one volume shared by every box (`cb-playwright`).
 
 The image is based on `node:26-trixie-slim` with git, gh, build-essential,
-cmake and the usual command-line tools. Heavier toolchains are opt-in
-[image features](#image-features-cb-image-config).
+cmake, just, go-task and the usual command-line tools. Heavier toolchains are
+opt-in [image features](#image-features-cb-image-config).
 
 ## Install
 

@@ -35,6 +35,7 @@ ARG UV_VERSION=0.12.1
 ARG GO_VERSION=1.26.5
 ARG TOFU_VERSION=1.12.6
 ARG KUBECTL_VERSION=1.37.1
+ARG TASK_VERSION=3.54.0
 ARG WITH_GO=0
 ARG WITH_TOFU=0
 ARG WITH_KUBERNETES=0
@@ -75,11 +76,25 @@ FROM node:26-trixie-slim AS kubernetes-0
 RUN mkdir -p /opt/kubernetes
 FROM kubernetes-${WITH_KUBERNETES} AS kubernetes
 
+# go-task, the `task` next to just: both are what projects reach for instead of
+# make, and a Taskfile.yml is as common now as a justfile. Not a feature: a
+# checkout with a Taskfile can do nothing without it, and ~45 MB is small next
+# to what the features cost. just comes from apt; task is in no Debian suite,
+# so it is built here from the Go module proxy with the same Go as above, which
+# keeps it off GitHub release downloads. Only the binary and its zsh completion
+# leave the stage.
+FROM golang:${GO_VERSION}-trixie AS task
+ARG TASK_VERSION
+RUN CGO_ENABLED=0 GOBIN=/opt/task go install -trimpath -ldflags='-s -w' \
+      github.com/go-task/task/v3/cmd/task@v${TASK_VERSION} \
+    && /opt/task/task --completion zsh > /opt/task/_task
+
 # Debian trixie rather than Alpine: projects get built inside this container,
 # and musl costs more there than Alpine's fresher packages gain. Every tool
 # comes from the distro repos - no `wget | sh`, no GitHub release downloads.
 # The only exceptions are claude-code (npm, the whole point of the box) plus uv,
-# Go, OpenTofu and kubectl, all copied out of official images (see above).
+# Go, OpenTofu and kubectl, all copied out of official images (see above), and
+# go-task, built from the Go module proxy in a stage of its own.
 FROM node:26-trixie-slim
 
 # Feature toggles (WITH_*) default to off, every one of them and every one added
@@ -537,6 +552,13 @@ RUN if [ "$WITH_OPENSCAD" = 1 ]; then \
       && sudo rm -rf /var/lib/apt/lists/*; \
     fi
 
+# go-task, from its stage at the top. Down here because the binary changes with
+# every TASK_VERSION and GO_VERSION bump, and that must not invalidate anything
+# expensive. The completion goes where Debian's zsh looks for vendor ones, next
+# to just's.
+COPY --from=task /opt/task/task /usr/local/bin/task
+COPY --from=task /opt/task/_task /usr/share/zsh/vendor-completions/_task
+
 # The only COPYs from the build context, and the reason they sit this low: a
 # COPY is cached on the content of what it copies, so every edit to one of these
 # scripts invalidates the layer and everything below it. Further up - where
@@ -580,6 +602,7 @@ LABEL cb.features="docker=${WITH_DOCKER},ffmpeg=${WITH_FFMPEG},go=${WITH_GO},kub
 ARG UV_VERSION
 ARG GO_VERSION
 ARG KUBECTL_VERSION
+ARG TASK_VERSION
 ARG TOFU_VERSION
-LABEL cb.versions="go=${GO_VERSION},kubectl=${KUBECTL_VERSION},tofu=${TOFU_VERSION},uv=${UV_VERSION}"
+LABEL cb.versions="go=${GO_VERSION},kubectl=${KUBECTL_VERSION},task=${TASK_VERSION},tofu=${TOFU_VERSION},uv=${UV_VERSION}"
 
