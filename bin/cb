@@ -2941,17 +2941,85 @@ def claude_project_move(volumes, source, target):
         return None
     if os.path.exists(new):
         return "{} already exists; Claude's history stays in {}".format(new, old)
-    sharing = sorted(
-        folder for _, folder in volumes
-        if folder
-        and relocate(os.path.realpath(folder), source, target) is None
-        and workspace_folder(folder) == old_folder
-    )
+    sharing = folder_sharers(volumes, source, target)
     if sharing:
         return "{} is shared with {}; Claude's history stays there".format(
             old, " ".join(sharing)
         )
     return old, new
+
+
+def folder_sharers(volumes, source, target):
+    """Checkouts outside the move whose workspace folder is the source's."""
+    old_folder = workspace_folder(source)
+    return sorted(
+        folder for _, folder in volumes
+        if folder
+        and relocate(os.path.realpath(folder), source, target) is None
+        and workspace_folder(folder) == old_folder
+    )
+
+
+def claude_config_path():
+    """Claude Code's .claude.json, which CLAUDE_CONFIG_DIR puts in the shared
+    directory."""
+    return os.path.join(HOST_CLAUDE_DIR, ".claude.json")
+
+
+def read_claude_config():
+    """.claude.json as a dict, or None when there is none."""
+    try:
+        with open(claude_config_path()) as handle:
+            config = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise CbError("{}: {}".format(claude_config_path(), error))
+    return config if isinstance(config, dict) else None
+
+
+def claude_config_move(volumes, source, target):
+    """(old folder, new folder) of Claude's per-project entry in .claude.json,
+    or None. The entry holds trust, allowedTools and mcpServers; left behind,
+    Claude asks for trust again. Kept under the same rules as the project
+    directory: not when the new folder has an entry of its own, not when
+    another checkout shares the old one.
+    """
+    old_folder, new_folder = workspace_folder(source), workspace_folder(target)
+    if old_folder == new_folder:
+        return None
+    projects = (read_claude_config() or {}).get("projects")
+    if not isinstance(projects, dict) or old_folder not in projects:
+        return None
+    if new_folder in projects or folder_sharers(volumes, source, target):
+        return None
+    return old_folder, new_folder
+
+
+def rename_claude_project(old_folder, new_folder):
+    """Rename the projects key in .claude.json, read afresh and replaced in one
+    rename, as Claude Code itself writes it: a box running elsewhere may have
+    written the file since the move was planned."""
+    if DRY_RUN:
+        print("+ rename {} to {} in {}".format(old_folder, new_folder, claude_config_path()))
+        return False
+    path = claude_config_path()
+    config = read_claude_config()
+    projects = (config or {}).get("projects")
+    if not isinstance(projects, dict) or old_folder not in projects or new_folder in projects:
+        return False
+    projects[new_folder] = projects.pop(old_folder)
+    temp = "{}.cb-{}".format(path, os.getpid())
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, os.stat(path).st_mode & 0o777)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(config, handle, indent=2)
+        os.replace(temp, path)
+    except OSError as error:
+        if os.path.exists(temp):
+            os.remove(temp)
+        raise CbError("cannot write {}: {}".format(path, error.strerror))
+    return True
 
 
 def move_path(old, new):
@@ -2991,6 +3059,7 @@ def cmd_mv(flags, args):
     volumes = history_volumes()
     histories = history_moves(volumes, source, target)
     claude = claude_project_move(volumes, source, target)
+    claude_entry = claude_config_move(volumes, source, target)
 
     move_path(source, target)
     print("moved {} -> {}".format(source, target))
@@ -3012,6 +3081,11 @@ def cmd_mv(flags, args):
         print("claude:   " + claude[1])
     elif claude:
         print("claude:   " + claude)
+
+    if claude_entry and rename_claude_project(*claude_entry):
+        print("claude:   {} -> {} in {}".format(
+            claude_entry[0], claude_entry[1], claude_config_path()
+        ))
 
     print(enabled_status(target))
     return 0

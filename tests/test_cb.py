@@ -11,6 +11,7 @@ rather than imported by name.
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import socket
 import tempfile
@@ -2625,6 +2626,53 @@ class MvCommandTest(unittest.TestCase):
         os.makedirs(cb.claude_project_dir("/workspaces/new"))
         self.mv("old", "new")
         self.assertTrue(os.path.isdir(old))
+
+    def write_claude_config(self, projects):
+        path = cb.claude_config_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as handle:
+            json.dump({"userID": "u", "projects": projects}, handle)
+        os.chmod(path, 0o600)
+        return path
+
+    def read_claude_config(self):
+        with open(cb.claude_config_path()) as handle:
+            return json.load(handle)
+
+    def test_moves_claudes_project_entry_with_the_folder(self):
+        # Trust, allowedTools and mcpServers live there, keyed by the folder.
+        path = self.write_claude_config({"/workspaces/old": {"hasTrustDialogAccepted": True}})
+        out = self.mv("old", "new")
+        config = self.read_claude_config()
+        self.assertEqual(config["projects"], {"/workspaces/new": {"hasTrustDialogAccepted": True}})
+        self.assertEqual(config["userID"], "u")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertIn("/workspaces/old -> /workspaces/new", out)
+
+    def test_keeps_claudes_project_entry_when_the_new_one_exists(self):
+        projects = {"/workspaces/old": {"a": 1}, "/workspaces/new": {"b": 2}}
+        self.write_claude_config(projects)
+        self.mv("old", "new")
+        self.assertEqual(self.read_claude_config()["projects"], projects)
+
+    def test_keeps_claudes_project_entry_when_another_checkout_shares_it(self):
+        projects = {"/workspaces/old": {"a": 1}}
+        self.write_claude_config(projects)
+        self.volumes = [("cb-history-ffff", "/elsewhere/old")]
+        self.mv("old", "new")
+        self.assertEqual(self.read_claude_config()["projects"], projects)
+
+    def test_moves_without_a_claude_config(self):
+        self.mv("old", "new")
+        self.assertFalse(os.path.exists(cb.claude_config_path()))
+
+    def test_dry_run_leaves_claudes_project_entry(self):
+        projects = {"/workspaces/old": {"a": 1}}
+        self.write_claude_config(projects)
+        self.addCleanup(setattr, cb, "DRY_RUN", False)
+        cb.DRY_RUN = True
+        self.mv("old", "new")
+        self.assertEqual(self.read_claude_config()["projects"], projects)
 
     def test_dry_run_changes_nothing(self):
         cb.save_settings(cb.settings_path(self.source), {"docker": True}, self.source)
