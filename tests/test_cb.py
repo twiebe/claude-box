@@ -2171,10 +2171,15 @@ class VolumePruneTest(unittest.TestCase):
             return 0
 
         def fake_capture(argv):
+            if argv[:4] == ["docker", "volume", "inspect", "--format"]:
+                return "".join(
+                    line + "\n" for line in self.dangling.splitlines()
+                    if line.split("\t")[0] in argv[5:]
+                )
             if argv[:3] == ["docker", "volume", "inspect"]:
                 return "[]" if argv[3] in self.volumes else None
-            if argv[:3] == ["docker", "volume", "ls"]:
-                return self.dangling
+            if argv[:4] == ["docker", "volume", "ls", "-q"]:
+                return "".join(line.split("\t")[0] + "\n" for line in self.dangling.splitlines())
             raise AssertionError(argv)
 
         for name, value in (("run", record), ("capture", fake_capture)):
@@ -2450,8 +2455,12 @@ class MvCommandTest(unittest.TestCase):
             return 0
 
         def fake_capture(argv):
-            if argv[:3] == ["docker", "volume", "ls"]:
-                return "".join("{}\t{}\n".format(*v) for v in self.volumes)
+            if argv[:4] == ["docker", "volume", "ls", "-q"]:
+                return "".join(name + "\n" for name, _ in self.volumes)
+            if argv[:4] == ["docker", "volume", "inspect", "--format"]:
+                return "".join(
+                    "{}\t{}\n".format(*v) for v in self.volumes if v[0] in argv[5:]
+                )
             if argv[:3] == ["docker", "volume", "inspect"]:
                 known = [name for name, _ in self.volumes]
                 return "[{}]" if argv[3] in known else None

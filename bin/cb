@@ -2700,6 +2700,40 @@ def empty_volume_argv(volume):
     ]
 
 
+def history_volume_labels(*filters):
+    """(name, folder) of every cb-history-* volume matching the `filters`, or
+    None if docker failed; folder is "" without a label.
+
+    Listed by name, then inspected for the label: podman's `volume ls --format`
+    has no .Label and no label map, `volume inspect` has the map on both. The
+    name filter matches anywhere in the name, hence the prefix check.
+    """
+    argv = ["docker", "volume", "ls", "-q", "--filter", "name=cb-history-"]
+    for spec in filters:
+        argv += ["--filter", spec]
+    out = capture(argv)
+    if out is None:
+        return None
+    names = [name for name in out.split() if name.startswith("cb-history-")]
+    if not names:
+        return []
+    out = capture(
+        [
+            "docker", "volume", "inspect",
+            "--format", '{{.Name}}\t{{index .Labels "%s"}}' % FOLDER_LABEL,
+        ]
+        + names
+    )
+    if out is None:
+        return None
+    volumes = []
+    for line in out.splitlines():
+        name, _, folder = line.partition("\t")
+        if name:
+            volumes.append((name, folder))
+    return volumes
+
+
 def orphaned_history_volumes():
     """(orphaned, unlabelled) cb-history-* volumes.
 
@@ -2711,19 +2745,8 @@ def orphaned_history_volumes():
 
     The name filter matches anywhere in the name, hence the prefix check.
     """
-    out = capture(
-        [
-            "docker", "volume", "ls",
-            "--filter", "dangling=true",
-            "--filter", "name=cb-history-",
-            "--format", '{{.Name}}\t{{.Label "%s"}}' % FOLDER_LABEL,
-        ]
-    )
     orphaned, unlabelled = [], []
-    for line in (out or "").splitlines():
-        name, _, folder = line.partition("\t")
-        if not name.startswith("cb-history-"):
-            continue
+    for name, folder in history_volume_labels("dangling=true") or []:
         if not folder:
             unlabelled.append(name)
         elif not os.path.isdir(folder):
@@ -2836,21 +2859,10 @@ def settings_moves(source, target):
 
 def history_volumes():
     """(name, folder) of every cb-history-* volume; folder is "" without a
-    label. The name filter matches anywhere in the name, hence the prefix check."""
-    out = capture(
-        [
-            "docker", "volume", "ls",
-            "--filter", "name=cb-history-",
-            "--format", '{{.Name}}\t{{.Label "%s"}}' % FOLDER_LABEL,
-        ]
-    )
-    if out is None:
+    label."""
+    volumes = history_volume_labels()
+    if volumes is None:
         raise CbError("docker is not answering - is the daemon running?")
-    volumes = []
-    for line in out.splitlines():
-        name, _, folder = line.partition("\t")
-        if name.startswith("cb-history-"):
-            volumes.append((name, folder))
     return volumes
 
 
