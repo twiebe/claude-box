@@ -1,0 +1,54 @@
+#!/usr/bin/env node
+// The host's gpg agent as a socket in a claude box started with --gpg-agent on
+// the Mac. cb relays the agent's extra socket over TCP there, since no socket
+// on the Mac's filesystem reaches the VM the box runs in; this offers it at
+// SOCKET again, where gpg looks for its agent. cb-entry starts it.
+//
+// CB_GPG_ADDR is host:port of cb's relay, CB_GPG_TOKEN what every connection
+// has to open with before cb passes it on to the agent.
+//
+// Node rather than socat: it is in the image already, and the token has to go
+// out ahead of gpg's own bytes.
+
+"use strict";
+const fs = require("fs");
+const net = require("net");
+
+const path = process.argv[2];
+const addr = process.env.CB_GPG_ADDR || "";
+const token = process.env.CB_GPG_TOKEN || "";
+const colon = addr.lastIndexOf(":");
+if (!path || colon < 0 || !token) {
+  console.error("cb-gpg-relay: usage: cb-gpg-relay SOCKET, with CB_GPG_ADDR and CB_GPG_TOKEN set");
+  process.exit(2);
+}
+const host = addr.slice(0, colon);
+const port = Number(addr.slice(colon + 1));
+
+try {
+  fs.unlinkSync(path);
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
+
+const server = net.createServer((local) => {
+  // Paused until piped, so whatever gpg sends first waits for the token.
+  local.pause();
+  const remote = net.connect(port, host, () => {
+    remote.write(token + "\n");
+    local.pipe(remote);
+    remote.pipe(local);
+    local.resume();
+  });
+  const close = () => {
+    local.destroy();
+    remote.destroy();
+  };
+  local.on("error", close);
+  remote.on("error", (error) => {
+    console.error("cb-gpg-relay: " + addr + ": " + error.message);
+    close();
+  });
+});
+
+server.listen(path, () => fs.chmodSync(path, 0o600));

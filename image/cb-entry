@@ -9,4 +9,31 @@
 # without a daemon.
 sudo --preserve-env=CB_DIND /usr/local/bin/cb-dockerd || true
 
+# The host's gpg agent, for a box started with --gpg-agent. On Linux cb mounts
+# the agent's socket at /run/cb-gnupg/S.gpg-agent and it is linked where gpg
+# looks; on the Mac cb relays it over TCP (CB_GPG_ADDR), and cb-gpg-relay turns
+# that back into a socket. Either way the socket is in place before the import
+# below runs gpg. no-autostart keeps gpg from quietly starting an agent of its
+# own, without the keys, when the host's cannot be reached: it says so instead.
+#
+# The host's public keys and ownertrust arrive as an export under
+# /run/cb-gnupg/keys, imported into a keyring of the box's own.
+if [ -d /run/cb-gnupg/keys ]; then
+  mkdir -p -m 700 "$HOME/.gnupg"
+  if [ -n "$CB_GPG_ADDR" ]; then
+    cb-gpg-relay "$HOME/.gnupg/S.gpg-agent" 2>>"$HOME/.gnupg/cb-gpg-relay.log" &
+    tries=0
+    while [ ! -S "$HOME/.gnupg/S.gpg-agent" ] && [ $tries -lt 50 ]; do
+      sleep 0.1
+      tries=$((tries + 1))
+    done
+  else
+    ln -sf /run/cb-gnupg/S.gpg-agent "$HOME/.gnupg/S.gpg-agent"
+  fi
+  grep -qx no-autostart "$HOME/.gnupg/gpg.conf" 2>/dev/null \
+    || echo no-autostart >>"$HOME/.gnupg/gpg.conf"
+  gpg --batch --quiet --import /run/cb-gnupg/keys/pubring.gpg 2>/dev/null || true
+  gpg --batch --quiet --import-ownertrust /run/cb-gnupg/keys/ownertrust.txt 2>/dev/null || true
+fi
+
 exec "$@"

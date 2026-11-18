@@ -94,8 +94,22 @@ sit at or above the real directory, not above a symlink leading to it.
 | ----------- | -------------------------------- | ------------------------------------------------------------------------------------------------ |
 | `docker`    | `--docker` / `--no-docker`       | Runs a Docker daemon inside the box, as a privileged container. Needs the `docker` image feature. |
 | `ssh-agent` | `--ssh-agent` / `--no-ssh-agent` | Forwards the host's ssh agent, so `git push` over ssh works. Keys stay in the agent. macOS only.  |
+| `gpg-agent` | `--gpg-agent` / `--no-gpg-agent` | Forwards the host's gpg agent and public keys, so `git commit -S` works. Private keys stay on the host. Needs gnupg on the host. Linux and macOS. |
 | `force`     | `--force`                        | Starts even where no tag allows it.                                                              |
 | `speak`     | `--speak` / `--no-speak`         | Lets `say` in the box speak on the host, see [Speech](#speech-cb---speak). Linux and macOS.       |
+
+`gpg-agent` gives the box the agent's extra socket (`gpgconf --list-dirs
+agent-extra-socket`), which can sign and decrypt but not export or change keys.
+On Linux the socket is bind-mounted. On macOS a socket on the Mac's filesystem
+does not reach the VM the box runs in, so cb relays it over TCP on the Mac's
+loopback, the way it does for `say`; every connection has to present a token
+cb hands only to that box, and the relay logs to
+`~/.local/state/claude-box/gpg-relay.log`. The public keys and ownertrust are
+exported with `gpg --export` at every start and imported into the box's own
+keyring, which also works where gpg keeps them in keyboxd. The box's gpg runs
+with `no-autostart`, so an unreachable agent is an error, not a silent local
+agent without keys. On Linux, if the host's agent restarts, boxes started before
+lose it until they are restarted; the Mac's relay reconnects on its own.
 
 ```sh
 cb config                  # every setting for this directory, and where its value comes from

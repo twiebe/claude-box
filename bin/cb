@@ -2,6 +2,7 @@
 """claude-box: a fresh container per run, with Claude Code in it."""
 
 import hashlib
+import hmac
 import fcntl
 import json
 import os
@@ -12,7 +13,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
 import urllib.request
 
 # The Dockerfiles live in image/ next to bin/, wherever the checkout is. realpath
@@ -133,6 +136,7 @@ SETTINGS_DEFAULTS = {
     "docker": False,
     "force": False,
     "ssh-agent": False,
+    "gpg-agent": False,
     "speak": False,
 }
 
@@ -316,6 +320,8 @@ TOGGLE_FLAGS = {
     "--force": ("force", True),
     "--ssh-agent": ("ssh-agent", True),
     "--no-ssh-agent": ("ssh-agent", False),
+    "--gpg-agent": ("gpg-agent", True),
+    "--no-gpg-agent": ("gpg-agent", False),
     "--speak": ("speak", True),
     "--no-speak": ("speak", False),
 }
@@ -399,6 +405,7 @@ def extract_flags(args):
         "docker": None,
         "force": None,
         "ssh-agent": None,
+        "gpg-agent": None,
         "speak": None,
         "yes": False,
         "dry_run": False,
@@ -1187,6 +1194,11 @@ BOX_SSH_AUTH_SOCK = "/run/ssh-agent.sock"
 # the VM, so it cannot be checked from here.
 MAC_SSH_AUTH_SOCK = "/run/host-services/ssh-auth.sock"
 
+# Where a box that asked for it finds what it needs of the host's gpg: the
+# public keys and ownertrust under keys/, and on Linux the agent's socket. See
+# start_gpg_agent().
+BOX_GNUPG_DIR = "/run/cb-gnupg"
+
 # Where a box that may speak finds the host's speaker. On Linux that is a
 # directory with the socket in it, mounted rather than the socket itself: a
 # bind mount of a file holds on to its inode, so a socket created anew would no
@@ -1354,7 +1366,7 @@ def fixed_targets(workspace):
     these would hide it."""
     return [
         workspace_folder(workspace), BOX_CLAUDE_DIR, "/commandhistory",
-        PLAYWRIGHT_DIR, BOX_SPEAK_DIR,
+        PLAYWRIGHT_DIR, BOX_SPEAK_DIR, BOX_GNUPG_DIR,
     ]
 
 
@@ -1882,8 +1894,269 @@ def start_speaker(directory, command):
         os._exit(0)
 
 
+# ---------------------------------------------------------------------------
+# The host's gpg agent: `cb --gpg-agent`
+#
+# The box signs with the host's agent and never sees a private key. It talks
+# to the agent's extra socket, the one gpg-agent offers for remote use: it
+# signs and decrypts, but cannot export or change keys.
+#
+# On Linux the socket is bind-mounted. On the Mac that does not work: the box
+# sits in a VM, and a socket on the Mac's filesystem shows up there as a file
+# nobody listens behind (OrbStack and Docker Desktop proxy the ssh agent, but
+# nothing else). So there cb relays it over TCP the way it does for `say`: a
+# forked process listens on the Mac's loopback, which both route
+# host.docker.internal to, and cb-gpg-relay in the box offers it as a socket
+# again. Every connection has to open with a token only the box knows, since
+# anything on the Mac can reach the loopback.
+#
+# gpg in the box also needs the public half of the keys to sign with, and the
+# ownertrust to verify. Both are exported afresh at every start and imported
+# by cb-entry: exported rather than mounted as files, because gpg 2.4 may keep
+# them in keyboxd's database, where no pubring.kbx exists.
+# ---------------------------------------------------------------------------
+
+# Where the export goes on the host, and is mounted in the box.
+GNUPG_KEYS_DIR = "gnupg"
+BOX_GNUPG_KEYS = BOX_GNUPG_DIR + "/keys"
+BOX_GNUPG_SOCKET = BOX_GNUPG_DIR + "/S.gpg-agent"
+
+# How long a box's relay gets to present its token.
+GPG_TOKEN_TIMEOUT = 5
+
+
+def gpg_keys_dir():
+    return os.path.join(state_dir(), GNUPG_KEYS_DIR)
+
+
+def gpgconf_dir(name):
+    """One of `gpgconf --list-dirs`, unescaped: gpgconf writes a colon, a
+    space and the like as %XX."""
+    output = capture(["gpgconf", "--list-dirs", name])
+    if not output or not output.strip():
+        raise CbError("gpgconf --list-dirs {} failed".format(name))
+    return urllib.parse.unquote(output.strip())
+
+
+def launch_gpg_agent():
+    """Start the host's agent unless it runs. It creates its sockets only once
+    it runs, and a socket that is not there cannot be mounted or relayed."""
+    try:
+        run(["gpgconf", "--launch", "gpg-agent"], quiet=True)
+    except MissingBinary:
+        raise UsageError("--gpg-agent needs gnupg on the host: gpgconf not found")
+
+
+def export_gpg_keys(directory):
+    """Write the host's public keys and ownertrust to `directory`.
+
+    Each file is written aside and renamed into place, so a box starting at
+    the same moment reads either the old export or the new one, never half.
+    Readable by all: under rootful docker the box's node need not be the host
+    user, and nothing in here is secret.
+    """
+    if DRY_RUN:
+        print("+ gpg --export > {}/pubring.gpg".format(directory))
+        print("+ gpg --export-ownertrust > {}/ownertrust.txt".format(directory))
+        return
+    os.makedirs(directory, mode=0o755, exist_ok=True)
+    os.chmod(directory, 0o755)
+    for name, argv in (
+        ("pubring.gpg", ["gpg", "--batch", "--export"]),
+        ("ownertrust.txt", ["gpg", "--batch", "--export-ownertrust"]),
+    ):
+        path = os.path.join(directory, name)
+        aside = "{}.{}".format(path, os.getpid())
+        try:
+            with open(aside, "wb") as handle:
+                completed = subprocess.run(
+                    argv, stdout=handle, stderr=subprocess.PIPE
+                )
+        except FileNotFoundError:
+            os.unlink(aside)
+            raise UsageError("--gpg-agent needs gnupg on the host: gpg not found")
+        if completed.returncode:
+            os.unlink(aside)
+            raise CbError(
+                "{} failed: {}".format(
+                    " ".join(argv), completed.stderr.decode(errors="replace").strip()
+                )
+            )
+        os.chmod(aside, 0o644)
+        os.replace(aside, path)
+
+
+def connect_gpg_agent(agent_socket):
+    """A connection to the host's agent, started anew if it has gone away
+    since the box started."""
+    for attempt in (0, 1):
+        agent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            agent.connect(agent_socket)
+            return agent
+        except OSError:
+            agent.close()
+            if attempt:
+                raise
+            subprocess.run(
+                ["gpgconf", "--launch", "gpg-agent"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+
+def read_token(conn, token):
+    """Whether `conn` opens with `token` and a newline."""
+    expected = (token + "\n").encode()
+    data = b""
+    conn.settimeout(GPG_TOKEN_TIMEOUT)
+    try:
+        while len(data) < len(expected):
+            chunk = conn.recv(len(expected) - len(data))
+            if not chunk:
+                return False
+            data += chunk
+    except OSError:
+        return False
+    conn.settimeout(None)
+    return hmac.compare_digest(data, expected)
+
+
+def pump(source, sink):
+    """Copy `source` to `sink` until `source` ends, then end `sink` too."""
+    try:
+        while True:
+            chunk = source.recv(65536)
+            if not chunk:
+                break
+            sink.sendall(chunk)
+    except OSError:
+        pass
+    try:
+        sink.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
+def relay_gpg(conn, agent_socket, token):
+    """One connection from a box, passed on to the agent once it has shown the
+    token."""
+    with conn:
+        if not read_token(conn, token):
+            print("gpg relay: a connection without the token, closed")
+            return
+        try:
+            agent = connect_gpg_agent(agent_socket)
+        except OSError as error:
+            print("gpg relay: cannot reach the agent at {}: {}".format(
+                agent_socket, error))
+            return
+        with agent:
+            back = threading.Thread(target=pump, args=(agent, conn), daemon=True)
+            back.start()
+            pump(conn, agent)
+            back.join()
+
+
+def serve_gpg(listener, agent_socket, token, alive, poll=1.0):
+    """Relay what arrives on `listener` until `alive()` says the box is gone.
+    A gpg operation holds its connection for as long as it takes, a passphrase
+    prompt included, so each one gets a thread of its own."""
+    listener.settimeout(poll)
+    try:
+        while alive():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            conn.settimeout(None)
+            threading.Thread(
+                target=relay_gpg, args=(conn, agent_socket, token), daemon=True
+            ).start()
+    finally:
+        listener.close()
+
+
+def start_gpg_relay(agent_socket):
+    """Fork off the relay for one box, and return the environment that tells
+    cb-gpg-relay in the box where it is. Like the speaker, it has its own
+    session and ends when the box does; it logs to gpg-relay.log."""
+    token = secrets.token_hex(16)
+    if DRY_RUN:
+        print("+ gpg relay: 127.0.0.1 -> {}".format(agent_socket))
+        return {"CB_GPG_ADDR": MAC_HOST_NAME + ":0", "CB_GPG_TOKEN": token}
+
+    listener = tcp_listener()
+    env = {
+        "CB_GPG_ADDR": "{}:{}".format(MAC_HOST_NAME, listener.getsockname()[1]),
+        "CB_GPG_TOKEN": token,
+    }
+    parent = os.getpid()
+    log = os.path.join(state_dir(), "gpg-relay.log")
+    os.makedirs(state_dir(), exist_ok=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    if os.fork():
+        listener.close()
+        return env
+
+    try:
+        os.setsid()
+        null = os.open(os.devnull, os.O_RDONLY)
+        out = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.dup2(null, 0)
+        os.dup2(out, 1)
+        os.dup2(out, 2)
+        sys.stdout = os.fdopen(1, "w", buffering=1)
+        serve_gpg(listener, agent_socket, token, lambda: os.getppid() == parent)
+    finally:
+        os._exit(0)
+
+
+def start_gpg_agent():
+    """What a box needs to use the host's gpg agent, as (mounts, env) for
+    run_argv.
+
+    A box that cannot have it is refused here rather than started without it,
+    as with the ssh agent: a signature that fails later, inside the box, says
+    far less about why.
+    """
+    if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
+        raise UsageError(
+            "--gpg-agent is only supported on Linux and macOS (this is {})".format(
+                sys.platform
+            )
+        )
+    launch_gpg_agent()
+    agent_socket = gpgconf_dir("agent-extra-socket")
+    if not DRY_RUN and not os.path.exists(agent_socket):
+        raise CbError(
+            "gpg-agent has no extra socket at {}\n"
+            "check that gpg-agent.conf does not set extra-socket none".format(
+                agent_socket
+            )
+        )
+    keys = gpg_keys_dir()
+    mounts = [(keys, BOX_GNUPG_KEYS, True)]
+    if sys.platform != "darwin":
+        # A file bind holds on to the socket's inode: if the host's agent
+        # restarts, a box started before keeps the dead one until it is
+        # started anew.
+        mounts.append((agent_socket, BOX_GNUPG_SOCKET, False))
+    for source, _, _ in mounts:
+        if "," in source:
+            raise UsageError(
+                "cannot mount {}: docker reads a comma in a --mount path as the "
+                "end of the field".format(source)
+            )
+    export_gpg_keys(keys)
+    if sys.platform == "darwin":
+        return mounts, start_gpg_relay(agent_socket)
+    return mounts, {}
+
+
 def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
-             agent_socket=None, ports=(), podman=False, speaker=None):
+             agent_socket=None, gpg=None, ports=(), podman=False,
+             speaker=None):
     """The whole of a box, as one `docker run`.
 
     --rm and the command in the foreground: the box lives exactly as long as
@@ -1899,6 +2172,9 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
 
     `agent_socket` is the host's ssh agent socket, from ssh_agent_socket(), or
     None for a box that has no business signing anything.
+
+    `gpg` is what start_gpg_agent() returned, (mounts, env), or None for a
+    box without the host's gpg agent.
 
     `ports` are published as they are spelled, see parse_port.
 
@@ -1962,6 +2238,9 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
         argv += ["--mount", mount_value(mount)]
     if agent_socket:
         argv += ["--mount", mount_value((agent_socket, BOX_SSH_AUTH_SOCK, False))]
+    if gpg:
+        for mount in gpg[0]:
+            argv += ["--mount", mount_value(mount)]
     if speaker and speaker[0] == "unix":
         argv += ["--mount", mount_value((speaker[1], BOX_SPEAK_DIR, False))]
     for port in ports:
@@ -1970,6 +2249,8 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
     env = container_env(docker)
     if agent_socket:
         env["SSH_AUTH_SOCK"] = BOX_SSH_AUTH_SOCK
+    if gpg:
+        env.update(gpg[1])
     if speaker and speaker[0] == "unix":
         env["CB_SPEAK_SOCKET"] = "{}/{}".format(BOX_SPEAK_DIR, SPEAK_SOCKET)
     elif speaker:
@@ -2136,11 +2417,12 @@ def start(flags, command):
     check_docker_feature(docker)
     ensure_claude_dir()
     ensure_history_volume(workspace)
+    gpg = start_gpg_agent() if settings["gpg-agent"][0] else None
     speaker = start_speaker(speaker_dir, speak_command()) if speak else None
     replace_process(
         run_argv(
             workspace, docker, mounts, command, suffix=suffix,
-            agent_socket=agent_socket, ports=ports, podman=rootless_podman(),
+            agent_socket=agent_socket, gpg=gpg, ports=ports, podman=rootless_podman(),
             speaker=speaker,
         )
     )
@@ -3139,6 +3421,8 @@ options
   --docker, --no-docker    give the box its own docker daemon
   --ssh-agent, --no-ssh-agent
                            hand the box the host's ssh agent (macOS only)
+  --gpg-agent, --no-gpg-agent
+                           hand the box the host's gpg agent and public keys
   --speak, --no-speak      let `say` in the box speak on the host, through
                            $CB_SPEAK_COMMAND (default: spd-say, say on macOS)
   --force                  allow a box where no tag enables it
@@ -3146,8 +3430,8 @@ options
   --dry-run                print the commands instead of running them
   --                       stop reading options; the rest is claude's
 
-  --docker, --ssh-agent, --speak and --force apply to this run only;
-  `cb config KEY true|false` keeps them for every run here
+  --docker, --ssh-agent, --gpg-agent, --speak and --force apply to this run
+  only; `cb config KEY true|false` keeps them for every run here
 
 image features: {features}
 """.format(features=" ".join(IMAGE_FEATURES))

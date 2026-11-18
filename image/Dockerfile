@@ -149,6 +149,9 @@ ENV CLAUDE_CODE_FORCE_SYNC_OUTPUT=1
 #                   below the protocol curl speaks.
 #   openssh-client  `git push` over ssh, with the host's agent from
 #                   `cb --ssh-agent`; without it git has no ssh to call.
+#   gnupg           `git commit -S` and `git verify-commit`, with the host's
+#                   agent and public keys from `cb --gpg-agent`; the private
+#                   keys stay on the host.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential \
   ca-certificates \
@@ -157,6 +160,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   fzf \
   gh \
   git \
+  gnupg \
   git-lfs \
   git-delta \
   iproute2 \
@@ -568,9 +572,12 @@ COPY --from=task /opt/task/_task /usr/share/zsh/vendor-completions/_task
 # top needs either file: both are read at container start, never during the
 # build. cb-entry is what cb runs as every box's command; it starts cb-dockerd.
 # cb-say is `say`, which a box started with --speak uses to speak on the host.
+# cb-gpg-relay is how a box started with --gpg-agent on the Mac reaches the
+# host's gpg agent.
 COPY --chmod=0755 cb-dockerd /usr/local/bin/cb-dockerd
 COPY --chmod=0755 cb-entry /usr/local/bin/cb-entry
 COPY --chmod=0755 cb-say /usr/local/bin/say
+COPY --chmod=0755 cb-gpg-relay /usr/local/bin/cb-gpg-relay
 
 # Skills every box offers, among them /speak, which tells Claude how and when to
 # use `say`. They go to the managed-policy directory for the reason the

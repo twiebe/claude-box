@@ -456,6 +456,15 @@ class ExtractFlagsTest(unittest.TestCase):
         flags, _ = cb.extract_flags([])
         self.assertIsNone(flags["ssh-agent"])
 
+    def test_gpg_agent_sets_the_toggle(self):
+        flags, rest = cb.extract_flags(["--gpg-agent"])
+        self.assertIs(flags["gpg-agent"], True)
+        self.assertEqual(rest, [])
+
+    def test_no_gpg_agent_clears_the_toggle(self):
+        flags, _ = cb.extract_flags(["--no-gpg-agent"])
+        self.assertIs(flags["gpg-agent"], False)
+
     def test_speak_sets_the_toggle(self):
         flags, rest = cb.extract_flags(["--speak"])
         self.assertEqual((flags["speak"], rest), (True, []))
@@ -1497,6 +1506,27 @@ class RunArgvTest(unittest.TestCase):
             "SSH_AUTH_SOCK=" + cb.BOX_SSH_AUTH_SOCK, flag_values(argv, "--env")
         )
 
+    def test_no_gpg_agent_by_default(self):
+        self.assertFalse(
+            any(cb.BOX_GNUPG_DIR in m for m in flag_values(self.argv, "--mount"))
+        )
+
+    def test_gpg_mounts_and_env_are_passed_through(self):
+        argv = cb.run_argv(
+            self.workspace, False, [], ["zsh"], tty=False,
+            gpg=(
+                [("/host/gnupg", cb.BOX_GNUPG_KEYS, True)],
+                {"CB_GPG_ADDR": "host.docker.internal:4711", "CB_GPG_TOKEN": "t"},
+            ),
+        )
+        self.assertIn(
+            "type=bind,source=/host/gnupg,target=/run/cb-gnupg/keys,readonly",
+            flag_values(argv, "--mount"),
+        )
+        env = flag_values(argv, "--env")
+        self.assertIn("CB_GPG_ADDR=host.docker.internal:4711", env)
+        self.assertIn("CB_GPG_TOKEN=t", env)
+
     def test_no_speech_by_default(self):
         self.assertFalse(any("CB_SPEAK_SOCKET" in e for e in flag_values(self.argv, "--env")))
         self.assertFalse(
@@ -1674,6 +1704,19 @@ class CmdRunTest(unittest.TestCase):
         with self.assertRaises(cb.UsageError):
             cb.cmd_run(self.flags(**{"ssh-agent": True}), [])
         self.assertEqual(self.replaced, [])
+
+    def test_stored_gpg_agent_is_used(self):
+        mount = ("/host/gnupg", cb.BOX_GNUPG_KEYS, True)
+        self.addCleanup(setattr, cb, "start_gpg_agent", cb.start_gpg_agent)
+        cb.start_gpg_agent = lambda: ([mount], {})
+        cb.save_settings(cb.settings_path(self.workspace), {"gpg-agent": True}, self.workspace)
+        cb.cmd_run(self.flags(), [])
+        self.assertIn(cb.mount_value(mount), flag_values(self.replaced[0], "--mount"))
+
+    def test_no_gpg_agent_without_the_setting(self):
+        self.addCleanup(setattr, cb, "start_gpg_agent", cb.start_gpg_agent)
+        cb.start_gpg_agent = lambda: self.fail("asked for the gpg agent")
+        cb.cmd_run(self.flags(), [])
 
 
     def speaking(self):
@@ -1973,6 +2016,135 @@ class SshAgentSocketTest(unittest.TestCase):
         cb.sys.platform = "linux"
         with self.assertRaises(cb.UsageError):
             cb.ssh_agent_socket()
+
+
+class StartGpgAgentTest(unittest.TestCase):
+    """What a box gets of the host's gpg: the key export always, the socket
+    mounted on Linux, a relay on the Mac."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = os.path.join(self.tmp.name, "gnupg home")
+        os.mkdir(self.home)
+        self.socket = os.path.join(self.home, "S.gpg-agent.extra")
+        Path(self.socket).touch()
+        self.launched = []
+        self.exported = []
+        self.relayed = []
+        dirs = {"agent-extra-socket": self.socket.replace(" ", "%20")}
+        self.addCleanup(setattr, cb.sys, "platform", cb.sys.platform)
+        for name, value in (
+            ("run", lambda argv, **kwargs: self.launched.append(argv)),
+            ("capture", lambda argv: dirs[argv[-1]] + "\n"),
+            ("gpg_keys_dir", lambda: "/state/gnupg"),
+            ("export_gpg_keys", self.exported.append),
+            ("start_gpg_relay", lambda path: self.relayed.append(path) or {"CB_GPG_ADDR": "x"}),
+        ):
+            self.addCleanup(setattr, cb, name, getattr(cb, name))
+            setattr(cb, name, value)
+
+    def test_linux_mounts_the_extra_socket(self):
+        cb.sys.platform = "linux"
+        self.assertEqual(
+            cb.start_gpg_agent(),
+            (
+                [
+                    ("/state/gnupg", "/run/cb-gnupg/keys", True),
+                    (self.socket, "/run/cb-gnupg/S.gpg-agent", False),
+                ],
+                {},
+            ),
+        )
+        self.assertEqual(self.exported, ["/state/gnupg"])
+        self.assertEqual(self.relayed, [])
+
+    def test_mac_relays_instead_of_mounting_the_socket(self):
+        cb.sys.platform = "darwin"
+        mounts, env = cb.start_gpg_agent()
+        self.assertEqual(mounts, [("/state/gnupg", "/run/cb-gnupg/keys", True)])
+        self.assertEqual(env, {"CB_GPG_ADDR": "x"})
+        self.assertEqual(self.relayed, [self.socket])
+
+    def test_starts_the_agent_first(self):
+        cb.sys.platform = "linux"
+        cb.start_gpg_agent()
+        self.assertEqual(self.launched, [["gpgconf", "--launch", "gpg-agent"]])
+
+    def test_missing_socket_is_refused(self):
+        cb.sys.platform = "linux"
+        os.unlink(self.socket)
+        with self.assertRaises(cb.CbError):
+            cb.start_gpg_agent()
+        self.assertEqual(self.exported, [])
+
+    def test_missing_gpgconf_is_refused(self):
+        cb.sys.platform = "linux"
+
+        def missing(argv, **kwargs):
+            raise cb.MissingBinary(argv[0])
+        cb.run = missing
+        with self.assertRaises(cb.UsageError):
+            cb.start_gpg_agent()
+
+
+class GpgRelayTest(unittest.TestCase):
+    """The host side of the Mac's relay, against a stand-in agent that echoes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.agent_path = os.path.join(self.tmp.name, "agent.sock")
+        agent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        agent.bind(self.agent_path)
+        agent.listen(4)
+        self.addCleanup(agent.close)
+
+        def echo():
+            while True:
+                try:
+                    conn, _ = agent.accept()
+                except OSError:
+                    return
+                with conn:
+                    conn.sendall(b"OK hello\n")
+                    while True:
+                        data = conn.recv(1024)
+                        if not data:
+                            break
+                        conn.sendall(data)
+        threading.Thread(target=echo, daemon=True).start()
+
+        self.listener = cb.tcp_listener()
+        self.port = self.listener.getsockname()[1]
+        self.running = True
+        self.addCleanup(setattr, self, "running", False)
+        threading.Thread(
+            target=cb.serve_gpg,
+            args=(self.listener, self.agent_path, "secret", lambda: self.running, 0.05),
+            daemon=True,
+        ).start()
+
+    def talk(self, opening):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as conn:
+            conn.sendall(opening)
+            conn.shutdown(socket.SHUT_WR)
+            data = b""
+            while True:
+                try:
+                    chunk = conn.recv(1024)
+                except ConnectionResetError:
+                    return data
+                if not chunk:
+                    return data
+                data += chunk
+
+    def test_token_opens_the_way_to_the_agent(self):
+        self.assertEqual(self.talk(b"secret\nSIGN\n"), b"OK hello\nSIGN\n")
+
+    def test_wrong_token_is_closed_unheard(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.talk(b"guess!\nSIGN\n"), b"")
 
 
 class RemovedSubcommandTest(unittest.TestCase):
