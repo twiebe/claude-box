@@ -13,4 +13,12 @@ FROM ${BASE_IMAGE}
 ARG CLAUDE_CODE_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Claude Code's temporary directory, scratchpads included, which cb keeps on a
+# volume per checkout. Created here as node so docker hands the volume node's
+# ownership when it first mounts it; the label tells cb the image is ready for
+# that. Here rather than in the base so `cb update-claude` is enough to get it.
+# The path is os.tmpdir()/claude-<uid> and has to match BOX_SCRATCH_DIR in cb.
+RUN mkdir -m 700 /tmp/claude-1000
+LABEL cb.scratch=1
+
 LABEL cb.claude=${CLAUDE_CODE_VERSION}

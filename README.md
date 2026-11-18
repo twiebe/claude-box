@@ -12,6 +12,11 @@ What survives a run lives outside the container:
 - **The checkout** is mounted at `/workspaces/<name>`, unique per repo, so
   Claude keeps transcripts, memory and trust per project as it does on the host.
 - **Shell history** is a Docker volume per checkout (`cb-history-<hash>`).
+- **Claude Code's temporary directory** (`/tmp/claude-1000`, scratchpads
+  included) is a Docker volume per checkout too (`cb-scratch-<hash>`), so a
+  resumed session finds its scratchpad again. It needs an image from
+  `cb update-claude` on or after this change; an older one starts without it
+  and says so.
 - **Playwright browsers** are one volume shared by every box (`cb-playwright`).
 
 The image is based on `node:26-trixie-slim` with git, gh, build-essential,
@@ -318,9 +323,10 @@ cb exec -n NAME CMD…     # in a specific box, by name or its last 4 characters
 
 ```sh
 cb volume prune playwright   # empty the shared browser cache
-cb volume prune all          # that, plus shell history of checkouts that are gone
+cb volume prune all          # that, plus shell history and scratchpads of
+                             # checkouts that are gone
 cb mv SRC DST                # move a checkout along with its settings, mounts,
-                             # shell history and Claude history
+                             # shell history, scratchpads and Claude history
 ```
 
 `--dry-run` makes any command print what it would run instead of running it;

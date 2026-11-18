@@ -1341,6 +1341,18 @@ class EnsureHistoryVolumeTest(unittest.TestCase):
     def test_leaves_an_existing_volume_alone(self):
         self.assertEqual(self.ensure("[{}]"), [])
 
+    def test_scratch_volume_is_labelled_the_same_way(self):
+        ran = []
+        for name, value in (
+            ("capture", lambda argv: None),
+            ("run", lambda argv, **kwargs: ran.append(argv)),
+        ):
+            self.addCleanup(setattr, cb, name, getattr(cb, name))
+            setattr(cb, name, value)
+        cb.ensure_scratch_volume("/w")
+        self.assertIn("{}=/w".format(cb.FOLDER_LABEL), ran[0])
+        self.assertEqual(ran[0][-1], "cb-scratch-" + cb.path_hash("/w"))
+
 
 class ContainerEnvTest(unittest.TestCase):
     """Baked in at creation time, so a later bare `cb` brings the box back up
@@ -1506,6 +1518,20 @@ class RunArgvTest(unittest.TestCase):
             "SSH_AUTH_SOCK=" + cb.BOX_SSH_AUTH_SOCK, flag_values(argv, "--env")
         )
 
+    def test_no_scratch_volume_unless_asked(self):
+        self.assertFalse(
+            any(cb.BOX_SCRATCH_DIR in m for m in flag_values(self.argv, "--mount"))
+        )
+
+    def test_scratch_volume_is_per_checkout(self):
+        argv = cb.run_argv(self.workspace, False, [], ["zsh"], tty=False, scratch=True)
+        self.assertIn(
+            "type=volume,source=cb-scratch-{},target=/tmp/claude-1000".format(
+                cb.path_hash(self.workspace)
+            ),
+            flag_values(argv, "--mount"),
+        )
+
     def test_no_gpg_agent_by_default(self):
         self.assertFalse(
             any(cb.BOX_GNUPG_DIR in m for m in flag_values(self.argv, "--mount"))
@@ -1608,6 +1634,8 @@ class CmdRunTest(unittest.TestCase):
         self.workspace = os.path.join(self.root, "repo")
         os.mkdir(self.workspace)
         self.replaced = []
+        self.scratched = []
+        self.scratch = True
         settings = os.path.join(self.tmp.name, "settings.json")
         for name, value in (
             ("current_workspace", lambda: self.workspace),
@@ -1618,6 +1646,8 @@ class CmdRunTest(unittest.TestCase):
             ("check_docker_feature", lambda docker: None),
             ("ensure_claude_dir", lambda: None),
             ("ensure_history_volume", lambda workspace: None),
+            ("ensure_scratch_volume", self.scratched.append),
+            ("scratch_supported", lambda: self.scratch),
             ("rootless_podman", lambda: False),
             ("replace_process", self.replaced.append),
         ):
@@ -1705,6 +1735,28 @@ class CmdRunTest(unittest.TestCase):
         with self.assertRaises(cb.UsageError):
             cb.cmd_run(self.flags(**{"ssh-agent": True}), [])
         self.assertEqual(self.replaced, [])
+
+    def test_scratch_volume_is_created_and_mounted(self):
+        cb.cmd_run(self.flags(), [])
+        self.assertEqual(self.scratched, [self.workspace])
+        self.assertIn(
+            "type=volume,source={},target=/tmp/claude-1000".format(
+                cb.scratch_volume(self.workspace)
+            ),
+            flag_values(self.replaced[0], "--mount"),
+        )
+
+    def test_an_image_without_the_label_gets_no_scratch_volume(self):
+        # Its /tmp/claude-1000 would come up root-owned and unwritable.
+        self.scratch = False
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            cb.cmd_run(self.flags(), [])
+        self.assertEqual(self.scratched, [])
+        self.assertFalse(
+            any(cb.BOX_SCRATCH_DIR in m for m in flag_values(self.replaced[0], "--mount"))
+        )
+        self.assertIn("cb update-claude", err.getvalue())
 
     def test_global_mounts_reach_docker(self):
         lib = os.path.join(self.root, "lib")
@@ -2430,7 +2482,9 @@ class VolumePruneTest(unittest.TestCase):
             "cb-history-bbbb\t{}\n"
             "cb-history-cccc\t\n"
             "not-cb-history-dddd\t/gone\n"
-        ).format(self.tmp.name)
+            "cb-scratch-aaaa\t/gone/checkout\n"
+            "cb-scratch-bbbb\t{}\n"
+        ).format(self.tmp.name, self.tmp.name)
 
         def record(argv, quiet=False, check=True):
             self.commands.append(list(argv))
@@ -2465,9 +2519,16 @@ class VolumePruneTest(unittest.TestCase):
         self.prune("playwright")
         self.assertFalse(any(argv[:3] == ["docker", "volume", "rm"] for argv in self.commands))
 
+    def test_all_removes_scratchpads_of_gone_checkouts_only(self):
+        self.prune("all")
+        removed = [argv for argv in self.commands if argv[:3] == ["docker", "volume", "rm"]]
+        self.assertTrue(any("cb-scratch-aaaa" in argv for argv in removed))
+        self.assertFalse(any("cb-scratch-bbbb" in argv for argv in removed))
+
     def test_all_removes_history_of_gone_checkouts_only(self):
         self.prune("all")
-        self.assertIn(["docker", "volume", "rm", "cb-history-aaaa"], self.commands)
+        removed = [argv for argv in self.commands if argv[:3] == ["docker", "volume", "rm"]]
+        self.assertTrue(any("cb-history-aaaa" in argv for argv in removed))
 
     def test_all_keeps_history_of_an_existing_checkout(self):
         # Every history volume is dangling between runs now.
@@ -2826,6 +2887,34 @@ class MvCommandTest(unittest.TestCase):
                 ["docker", "volume", "rm", old],
             ],
         )
+
+    def test_copies_the_scratch_volume_and_renames_the_project_inside(self):
+        old = cb.scratch_volume(self.source)
+        self.volumes = [(old, self.source)]
+        self.mv("old", "new")
+        new = cb.scratch_volume(self.target)
+        self.assertEqual(
+            self.commands,
+            [
+                ["docker", "volume", "create", "--label",
+                 "cb.folder=" + self.target, new],
+                cb.copy_volume_argv(old, new),
+                cb.rename_scratch_argv(new, "/workspaces/old", "/workspaces/new"),
+                ["docker", "volume", "rm", old],
+            ],
+        )
+
+    def test_scratch_of_a_box_below_keeps_its_project_name(self):
+        # lib moves along but keeps its basename, and with it its folder.
+        old = cb.scratch_volume(self.lib)
+        self.volumes = [(old, self.lib)]
+        self.mv("old", "new")
+        self.assertFalse(any("sh" in argv and "-c" in argv for argv in self.commands))
+
+    def test_rename_scratch_escapes_like_claude_code(self):
+        argv = cb.rename_scratch_argv("v", "/workspaces/old", "/workspaces/new.x")
+        self.assertEqual(argv[-2:], ["-workspaces-old", "-workspaces-new-x"])
+        self.assertEqual(argv[argv.index("--user") + 1], "root")
 
     def test_copies_the_history_as_root(self):
         # The image runs as node; the new volume belongs to root.

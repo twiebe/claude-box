@@ -1238,19 +1238,53 @@ def history_volume(workspace):
     throwaway state, and `docker volume ls | grep cb-history-` finds them for
     anyone who wants the disk back.
     """
-    return "cb-history-" + path_hash(workspace)
+    return HISTORY_PREFIX + path_hash(workspace)
+
+
+# Claude Code's own temporary directory in the box: os.tmpdir()/claude-<uid>,
+# with a directory per project and one per session below it, the scratchpad
+# among them. /tmp lives only as long as the container, so without a volume
+# every scratchpad is gone when the box exits. One volume per checkout, like
+# the shell history, so a resumed session finds its scratchpad again and one
+# project's leftovers never show up in another's box.
+#
+# The image creates the directory as node and says so with SCRATCH_LABEL;
+# docker copies that ownership into the volume when it first mounts it. An
+# image from before has neither, and the volume would come up root-owned, a
+# temporary directory Claude Code cannot write to - so such an image gets no
+# volume, just a hint (see scratch_supported).
+BOX_SCRATCH_DIR = "/tmp/claude-1000"
+SCRATCH_LABEL = "cb.scratch"
+HISTORY_PREFIX = "cb-history-"
+SCRATCH_PREFIX = "cb-scratch-"
+
+
+def scratch_volume(workspace):
+    return SCRATCH_PREFIX + path_hash(workspace)
+
+
+def scratch_supported():
+    """Whether the image prepared BOX_SCRATCH_DIR for a volume."""
+    return bool(image_label(SCRATCH_LABEL))
 
 
 def ensure_history_volume(workspace):
-    """Create the history volume with the folder it belongs to as a label.
+    ensure_folder_volume(history_volume(workspace), workspace)
 
-    Every history volume is dangling between runs now, so `cb volume prune`
+
+def ensure_scratch_volume(workspace):
+    ensure_folder_volume(scratch_volume(workspace), workspace)
+
+
+def ensure_folder_volume(volume, workspace):
+    """Create `volume` with the folder it belongs to as a label.
+
+    Every volume of a checkout is dangling between runs, so `cb volume prune`
     needs the label to tell a gone checkout from one that is just idle.
     A volume that already exists is left as it was - one from before this label
     stays unlabelled. Asked first rather than left to `docker volume create`:
     docker treats an existing name as a no-op, podman refuses it.
     """
-    volume = history_volume(workspace)
     if capture(["docker", "volume", "inspect", volume]) is not None:
         return
     run(
@@ -1369,7 +1403,7 @@ def fixed_targets(workspace):
     a box starts: a global mount is checked against it at each start."""
     fixed = [
         BOX_CLAUDE_DIR, "/commandhistory", PLAYWRIGHT_DIR, BOX_SPEAK_DIR,
-        BOX_GNUPG_DIR,
+        BOX_GNUPG_DIR, BOX_SCRATCH_DIR,
     ]
     return ([workspace_folder(workspace)] if workspace else []) + fixed
 
@@ -2160,7 +2194,7 @@ def start_gpg_agent():
 
 def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
              agent_socket=None, gpg=None, ports=(), podman=False,
-             speaker=None):
+             speaker=None, scratch=False):
     """The whole of a box, as one `docker run`.
 
     --rm and the command in the foreground: the box lives exactly as long as
@@ -2181,6 +2215,9 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
     box without the host's gpg agent.
 
     `ports` are published as they are spelled, see parse_port.
+
+    `scratch` mounts the checkout's scratch volume at BOX_SCRATCH_DIR, for an
+    image that is ready for it (scratch_supported).
 
     `speaker` is what start_speaker() returned, or None for a box that stays
     silent.
@@ -2233,10 +2270,13 @@ def run_argv(workspace, docker, mounts, command, tty=None, suffix=None,
         (HOST_CLAUDE_DIR, BOX_CLAUDE_DIR),
     ):
         argv += ["--mount", "type=bind,source={},target={}".format(source, target)]
-    for source, target in (
+    volumes = [
         (history_volume(workspace), "/commandhistory"),
         (PLAYWRIGHT_VOLUME, PLAYWRIGHT_DIR),
-    ):
+    ]
+    if scratch:
+        volumes.append((scratch_volume(workspace), BOX_SCRATCH_DIR))
+    for source, target in volumes:
         argv += ["--mount", "type=volume,source={},target={}".format(source, target)]
     for mount in mounts:
         argv += ["--mount", mount_value(mount)]
@@ -2445,13 +2485,22 @@ def start(flags, command):
     check_docker_feature(docker)
     ensure_claude_dir()
     ensure_history_volume(workspace)
+    scratch = scratch_supported()
+    if scratch:
+        ensure_scratch_volume(workspace)
+    else:
+        print(
+            "cb: scratchpads are not kept, the image predates it - "
+            "run `cb update-claude`",
+            file=sys.stderr,
+        )
     gpg = start_gpg_agent() if settings["gpg-agent"][0] else None
     speaker = start_speaker(speaker_dir, speak_command()) if speak else None
     replace_process(
         run_argv(
             workspace, docker, mounts, command, suffix=suffix,
             agent_socket=agent_socket, gpg=gpg, ports=ports, podman=rootless_podman(),
-            speaker=speaker,
+            speaker=speaker, scratch=scratch,
         )
     )
     return 0
@@ -2997,8 +3046,9 @@ def cmd_volume(flags, args):
     has it mounted, and docker refuses to remove a volume any container uses,
     even a stopped one. The next `playwright install` fetches what is needed.
 
-    all adds the shell history of checkouts that no longer exist. The history of
-    one that still exists is kept, whether or not a box is running for it.
+    all adds the shell history and the scratchpads of checkouts that no longer
+    exist. Those of one that still exists are kept, whether or not a box is
+    running for it.
     """
     if len(args) != 2 or args[0] != "prune" or args[1] not in VOLUME_TARGETS:
         raise UsageError("usage: cb volume prune <{}>".format("|".join(VOLUME_TARGETS)))
@@ -3006,6 +3056,9 @@ def cmd_volume(flags, args):
     histories, unlabelled = [], []
     if args[1] == "all":
         histories, unlabelled = orphaned_history_volumes()
+        scratches, unlabelled_scratches = orphaned_history_volumes(SCRATCH_PREFIX)
+        histories += scratches
+        unlabelled += unlabelled_scratches
     has_browsers = capture(["docker", "volume", "inspect", PLAYWRIGHT_VOLUME]) is not None
 
     if unlabelled:
@@ -3050,21 +3103,22 @@ def empty_volume_argv(volume):
     ]
 
 
-def history_volume_labels(*filters):
-    """(name, folder) of every cb-history-* volume matching the `filters`, or
-    None if docker failed; folder is "" without a label.
+def history_volume_labels(*filters, prefix=HISTORY_PREFIX):
+    """(name, folder) of every volume named `prefix`* (cb-history-* unless
+    told otherwise) matching the `filters`, or None if docker failed; folder is
+    "" without a label.
 
     Listed by name, then inspected for the label: podman's `volume ls --format`
     has no .Label and no label map, `volume inspect` has the map on both. The
     name filter matches anywhere in the name, hence the prefix check.
     """
-    argv = ["docker", "volume", "ls", "-q", "--filter", "name=cb-history-"]
+    argv = ["docker", "volume", "ls", "-q", "--filter", "name=" + prefix]
     for spec in filters:
         argv += ["--filter", spec]
     out = capture(argv)
     if out is None:
         return None
-    names = [name for name in out.split() if name.startswith("cb-history-")]
+    names = [name for name in out.split() if name.startswith(prefix)]
     if not names:
         return []
     out = capture(
@@ -3084,7 +3138,7 @@ def history_volume_labels(*filters):
     return volumes
 
 
-def orphaned_history_volumes():
+def orphaned_history_volumes(prefix=HISTORY_PREFIX):
     """(orphaned, unlabelled) cb-history-* volumes.
 
     Dangling alone means nothing any more: with --rm every history volume is
@@ -3096,7 +3150,7 @@ def orphaned_history_volumes():
     The name filter matches anywhere in the name, hence the prefix check.
     """
     orphaned, unlabelled = [], []
-    for name, folder in history_volume_labels("dangling=true") or []:
+    for name, folder in history_volume_labels("dangling=true", prefix=prefix) or []:
         if not folder:
             unlabelled.append(name)
         elif not os.path.isdir(folder):
@@ -3119,6 +3173,11 @@ def orphaned_history_volumes():
 # ---------------------------------------------------------------------------
 
 MV_USAGE = "usage: cb mv SRC DST"
+
+
+def relocate_back(path, source, target):
+    """Where `path` was before `source` moved to `target`."""
+    return relocate(path, target, source)
 
 
 def relocate(path, source, target):
@@ -3216,7 +3275,15 @@ def history_volumes():
     return volumes
 
 
-def history_moves(volumes, source, target):
+def scratch_volumes():
+    """(name, folder) of every cb-scratch-* volume."""
+    volumes = history_volume_labels(prefix=SCRATCH_PREFIX)
+    if volumes is None:
+        raise CbError("docker is not answering - is the daemon running?")
+    return volumes
+
+
+def history_moves(volumes, source, target, volume_name=history_volume):
     """(old volume, new volume, new folder) for the history of every moved box.
 
     docker cannot rename a volume, so each one is copied into a new volume and
@@ -3228,14 +3295,14 @@ def history_moves(volumes, source, target):
         new_folder = relocate(folder, source, target) if folder else None
         if new_folder is not None:
             moves[name] = new_folder
-    own = history_volume(source)
+    own = volume_name(source)
     if own not in moves and any(name == own for name, _ in volumes):
         moves[own] = target
 
     existing = {name for name, _ in volumes}
     result = []
     for old, folder in sorted(moves.items()):
-        new = history_volume(folder)
+        new = volume_name(folder)
         if new in existing:
             raise CbError(
                 "{} already exists for {}; remove it first".format(new, folder)
@@ -3259,6 +3326,25 @@ def copy_volume_argv(old, new):
         "--entrypoint", "cp",
         CB_IMAGE,
         "-a", "/from/.", "/to/",
+    ]
+
+
+def rename_scratch_argv(volume, old_folder, new_folder):
+    """Rename the project directory in scratch volume `volume` from the one
+    Claude Code names after `old_folder` to the one it names after
+    `new_folder`, both folders in the box. Claude Code finds a session's
+    scratchpad by the project's path; after a rename the old name would be
+    left behind unread. As root, for the reason copy_volume_argv gives.
+    """
+    old = re.sub(r"[^a-zA-Z0-9]", "-", old_folder)
+    new = re.sub(r"[^a-zA-Z0-9]", "-", new_folder)
+    return [
+        "docker", "run", "--rm", "--user", "root",
+        "--mount", "type=volume,source={},target=/v".format(volume),
+        "--entrypoint", "sh",
+        CB_IMAGE,
+        "-c", 'if [ -d "/v/$1" ] && [ ! -e "/v/$2" ]; then mv "/v/$1" "/v/$2"; fi',
+        "sh", old, new,
     ]
 
 
@@ -3408,6 +3494,7 @@ def cmd_mv(flags, args):
     settings = settings_moves(source, target)
     volumes = history_volumes()
     histories = history_moves(volumes, source, target)
+    scratches = history_moves(scratch_volumes(), source, target, scratch_volume)
     claude = claude_project_move(volumes, source, target)
     claude_entry = claude_config_move(volumes, source, target)
 
@@ -3425,6 +3512,15 @@ def cmd_mv(flags, args):
         run(copy_volume_argv(old, new), quiet=True)
         run(["docker", "volume", "rm", old], quiet=True)
         print("history:  {} -> {}".format(old, new))
+
+    for old, new, folder in scratches:
+        ensure_scratch_volume(folder)
+        run(copy_volume_argv(old, new), quiet=True)
+        old_folder = workspace_folder(relocate_back(folder, source, target))
+        if old_folder != workspace_folder(folder):
+            run(rename_scratch_argv(new, old_folder, workspace_folder(folder)), quiet=True)
+        run(["docker", "volume", "rm", old], quiet=True)
+        print("scratch:  {} -> {}".format(old, new))
 
     if isinstance(claude, tuple):
         move_path(*claude)
@@ -3471,14 +3567,15 @@ USAGE = """usage: cb [command] [options]
                            defaults for every directory without its own value
   cb volume prune playwright
                            empty the browser cache every box shares
-  cb volume prune all      that, plus the shell history of checkouts that are gone
+  cb volume prune all      that, plus the shell history and scratchpads of
+                           checkouts that are gone
   cb enable all|git [DIR]  let boxes start in DIR (default: here) and below it;
                            git: only at the top of a git checkout
   cb disable [DIR]         keep boxes out of DIR and below, whatever is above
   cb untag [DIR]           remove DIR's tag; the one further up applies again
   cb enabled [DIR]         whether a box may start in DIR, and why
   cb mv SRC DST            move a directory along with its settings, mounts,
-                           shell history and Claude history
+                           shell history, scratchpads and Claude history
   cb speech [on|off|pause DURATION]
                            speech of every box on this host: on, off, or off
                            for a while (30m, 2h, 1h30m) counted from now
