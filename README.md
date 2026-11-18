@@ -152,6 +152,30 @@ target replaces that mount for one run, for example to make it read-only once.
 `add` and `rm` with several arguments change all of them or, if one fails,
 none; `add --ro` makes every one of them read-only.
 
+`--global` remembers mounts for every directory, stored next to the global
+settings in `~/.local/state/claude-box/settings.json`:
+
+```sh
+cb mount --global add --ro ~/.npmrc:/home/node/.npmrc
+cb mount --global ls                     # only the global ones
+cb mount --global rm ~/.npmrc
+cb mount --global prune
+```
+
+A box gets the global mounts, then the directory's, then the run's `-v`; each
+replaces an earlier one on the same target. `cb mount ls` shows what a box in
+the current directory gets, global mounts marked `(global)`. A global mount of a
+checkout at its usual `/workspaces/<name>` is left out in that checkout, since
+cb mounts it there anyway; any other global mount on the checkout's folder stops
+the box with an error.
+
+Single files can be mounted too. Give them an explicit `DST`, since the
+default `/workspaces/<name>` is rarely where a file belongs. A file mount holds
+on to the file it found at the start: a tool that saves by writing a new file
+and renaming it over the old one (many editors, `sed -i`, git) leaves the box
+with the old content until it is restarted. Mount the directory instead when
+the box has to follow such changes.
+
 ## Published ports: `cb port` and `--port`
 
 To reach a dev server in the box from the host, publish its port. Specs use

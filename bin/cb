@@ -1363,11 +1363,15 @@ def merge_mounts(persistent, per_run):
 
 def fixed_targets(workspace):
     """Where cb itself mounts something. An extra mount on or around one of
-    these would hide it."""
-    return [
-        workspace_folder(workspace), BOX_CLAUDE_DIR, "/commandhistory",
-        PLAYWRIGHT_DIR, BOX_SPEAK_DIR, BOX_GNUPG_DIR,
+    these would hide it.
+
+    `workspace` None leaves out the checkout's folder, which depends on where
+    a box starts: a global mount is checked against it at each start."""
+    fixed = [
+        BOX_CLAUDE_DIR, "/commandhistory", PLAYWRIGHT_DIR, BOX_SPEAK_DIR,
+        BOX_GNUPG_DIR,
     ]
+    return ([workspace_folder(workspace)] if workspace else []) + fixed
 
 
 def nested(a, b):
@@ -2339,9 +2343,33 @@ def stored_mounts(stored):
     return [parse_mount(str(spec), "/") for spec in specs]
 
 
+def global_mounts():
+    """The mounts `cb mount --global` remembers for every directory."""
+    return stored_mounts(load_settings(global_settings_path()))
+
+
+def directory_mounts(workspace):
+    """What a box in `workspace` gets without -v: the global mounts, then the
+    directory's own, as [(mount, origin)]. A directory mount on a global one's
+    target replaces it, as a directory setting beats a global one.
+
+    A global mount of the checkout itself, at its usual folder, is left out in
+    that checkout: a sibling repo mounted everywhere is the box's own workspace
+    when the box starts there, and cb mounts that already.
+    """
+    folder = workspace_folder(workspace)
+    merged = {}
+    for mount in global_mounts():
+        if (mount[0], mount[1]) != (workspace, folder):
+            merged[mount[1]] = (mount, "global")
+    for mount in stored_mounts(load_settings(settings_path(workspace))):
+        merged[mount[1]] = (mount, "file")
+    return list(merged.values())
+
+
 def box_mounts(workspace, specs):
     """Remembered mounts plus this run's, checked before anything starts."""
-    persistent = stored_mounts(load_settings(settings_path(workspace)))
+    persistent = [mount for mount, _ in directory_mounts(workspace)]
     per_run = [parse_mount(spec, workspace) for spec in specs]
     mounts = merge_mounts(persistent, per_run)
     check_targets(mounts, fixed_targets(workspace))
@@ -2546,8 +2574,10 @@ def cmd_config(flags, args):
         value, source = settings[key]
         print("{:<9} {:<6} ({})".format(key, str(value).lower(), source))
 
-    mounts = stored_mounts(load_settings(settings_path(workspace)))
-    print("{:<9} {:<6} (cb mount ls)".format("mounts", len(mounts)))
+    mounts = directory_mounts(workspace)
+    shared = sum(1 for _, origin in mounts if origin == "global")
+    print("{:<9} {:<6} (cb mount ls{})".format(
+        "mounts", len(mounts), ", {} global".format(shared) if shared else ""))
     ports = stored_ports(load_settings(settings_path(workspace)))
     print("{:<9} {:<6} (cb port ls)".format("ports", len(ports)))
 
@@ -2663,6 +2693,7 @@ def global_config(args):
     for key in sorted(settings):
         value, source = settings[key]
         print("{:<9} {:<6} ({})".format(key, str(value).lower(), source))
+    print("{:<9} {:<6} (cb mount --global ls)".format("mounts", len(global_mounts())))
     return 0
 
 
@@ -2696,17 +2727,22 @@ def set_setting(key, value, scope="directory"):
     if value not in ("true", "false"):
         raise UsageError("{} takes true or false, not {}".format(key, value))
     if scope == "global":
-        path = global_settings_path()
-        stored = load_settings(path)
-        stored["version"] = SETTINGS_VERSION
-        stored[key] = value == "true"
-        write_json(path, stored)
-        print("{} {} ({})".format(key, value, path))
+        save_global_settings({key: value == "true"})
+        print("{} {} ({})".format(key, value, global_settings_path()))
         return 0
     workspace = current_workspace()
     save_settings(settings_path(workspace), {key: value == "true"}, workspace)
     print("{} {} ({})".format(key, value, settings_path(workspace)))
     return 0
+
+
+def save_global_settings(overrides):
+    """Merge `overrides` into the global file and write it back."""
+    path = global_settings_path()
+    stored = load_settings(path)
+    stored["version"] = SETTINGS_VERSION
+    stored.update(overrides)
+    write_json(path, stored)
 
 
 def prune_settings():
@@ -2731,13 +2767,15 @@ def prune_settings():
 
 
 MOUNT_USAGE = (
-    "usage: cb mount add [--ro] SRC[:DST][:ro]... | cb mount rm SRC|DST... "
-    "| cb mount ls | cb mount prune"
+    "usage: cb mount [--global] add [--ro] SRC[:DST][:ro]... "
+    "| cb mount [--global] rm SRC|DST... | cb mount [--global] ls "
+    "| cb mount [--global] prune"
 )
 
 
 def cmd_mount(flags, args):
-    """Mounts remembered for this workspace, applied to every run started here.
+    """Mounts remembered for this workspace, applied to every run started here,
+    or with --global for every directory.
 
     Stored as normalised spec strings next to docker and force, so the settings
     file stays readable and hand-editable.
@@ -2746,17 +2784,33 @@ def cmd_mount(flags, args):
     half-done change would leave the agent with mounts nobody asked for.
     `add --ro` is the spec's :ro without having to spell out DST, wherever on
     the line it is given, and applies to every spec. `prune` forgets them all.
+
+    A directory mount may sit on a global one's target and replaces it there;
+    `ls` shows what a box here gets, the global ones marked as such.
     """
+    scope = "global" if "--global" in args else "directory"
+    args = [arg for arg in args if arg != "--global"]
     readonly = bool(args) and args[0] == "add" and "--ro" in args
     if readonly:
         args = [arg for arg in args if arg != "--ro"]
     workspace = current_workspace()
-    path = settings_path(workspace)
-    current = stored_mounts(load_settings(path))
+    if scope == "global":
+        path = global_settings_path()
+        current = global_mounts()
+    else:
+        path = settings_path(workspace)
+        current = stored_mounts(load_settings(path))
 
     if args == ["ls"]:
-        for source, target, readonly in current:
-            print("{}  {}  {}".format(source, target, "ro" if readonly else "rw"))
+        if scope == "global":
+            listed = [(mount, "global") for mount in current]
+        else:
+            listed = directory_mounts(workspace)
+        for (source, target, readonly), origin in listed:
+            print("{}  {}  {}{}".format(
+                source, target, "ro" if readonly else "rw",
+                "  (global)" if origin == "global" and scope != "global" else "",
+            ))
         return 0
 
     if args == ["prune"]:
@@ -2777,7 +2831,9 @@ def cmd_mount(flags, args):
             if any(existing[1] == mount[1] for existing in current + added):
                 raise UsageError("something is already mounted at " + mount[1])
             added.append(mount)
-        check_targets(added, fixed_targets(workspace))
+        check_targets(
+            added, fixed_targets(None if scope == "global" else workspace)
+        )
         require_sources(added)
         updated = current + added
     elif len(args) >= 2 and args[0] == "rm":
@@ -2788,12 +2844,24 @@ def cmd_mount(flags, args):
             source, target = resolve_path(arg, workspace), os.path.normpath(arg)
             kept = [m for m in updated if m[0] != source and m[1] != target]
             if len(kept) == len(updated):
+                if scope != "global" and any(
+                    m[0] == source or m[1] == target for m in global_mounts()
+                ):
+                    raise CbError(
+                        "{} is a global mount: cb mount --global rm {}".format(
+                            arg, arg
+                        )
+                    )
                 raise CbError("no mount for " + arg)
             updated = kept
     else:
         raise UsageError(MOUNT_USAGE)
 
-    save_settings(path, {"mounts": [format_mount(m) for m in updated]}, workspace)
+    specs = [format_mount(m) for m in updated]
+    if scope == "global":
+        save_global_settings({"mounts": specs})
+    else:
+        save_settings(path, {"mounts": specs}, workspace)
     print("{} mount(s) ({})".format(len(updated), path))
     return 0
 
@@ -3388,6 +3456,9 @@ USAGE = """usage: cb [command] [options]
   cb mount rm SRC|DST...
   cb mount ls              mounts every run in this directory gets
   cb mount prune           forget every mount of this directory
+  cb mount --global add|rm|ls|prune ...
+                           the same for mounts every directory gets; a
+                           directory's own mount on the same DST wins
   cb port add [IP:][HOST:]CONTAINER[/PROTO]
   cb port rm SPEC|HOST
   cb port ls               ports every run in this directory publishes

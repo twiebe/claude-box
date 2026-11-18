@@ -1612,6 +1612,7 @@ class CmdRunTest(unittest.TestCase):
         for name, value in (
             ("current_workspace", lambda: self.workspace),
             ("settings_path", lambda path: settings),
+            ("global_settings_path", lambda: os.path.join(self.tmp.name, "global.json")),
             ("is_enabled", lambda path: True),
             ("ensure_image", lambda: None),
             ("check_docker_feature", lambda docker: None),
@@ -1703,6 +1704,24 @@ class CmdRunTest(unittest.TestCase):
         cb.sys.platform = "linux"
         with self.assertRaises(cb.UsageError):
             cb.cmd_run(self.flags(**{"ssh-agent": True}), [])
+        self.assertEqual(self.replaced, [])
+
+    def test_global_mounts_reach_docker(self):
+        lib = os.path.join(self.root, "lib")
+        os.mkdir(lib)
+        cb.save_global_settings({"mounts": [lib + ":/mnt/lib:ro"]})
+        cb.cmd_run(self.flags(), [])
+        self.assertIn(
+            "type=bind,source={},target=/mnt/lib,readonly".format(lib),
+            flag_values(self.replaced[0], "--mount"),
+        )
+
+    def test_global_mount_on_the_checkouts_folder_stops_before_docker(self):
+        lib = os.path.join(self.root, "lib")
+        os.mkdir(lib)
+        cb.save_global_settings({"mounts": [lib + ":/workspaces/repo"]})
+        with self.assertRaises(cb.UsageError):
+            cb.cmd_run(self.flags(), [])
         self.assertEqual(self.replaced, [])
 
     def test_stored_gpg_agent_is_used(self):
@@ -2172,9 +2191,11 @@ class MountCommandTest(unittest.TestCase):
         os.mkdir(self.workspace)
         os.mkdir(self.lib)
         self.settings = os.path.join(self.tmp.name, "settings.json")
+        self.global_settings = os.path.join(self.tmp.name, "global.json")
         for name, value in (
             ("current_workspace", lambda: self.workspace),
             ("settings_path", lambda path: self.settings),
+            ("global_settings_path", lambda: self.global_settings),
         ):
             self.addCleanup(setattr, cb, name, getattr(cb, name))
             setattr(cb, name, value)
@@ -2187,6 +2208,78 @@ class MountCommandTest(unittest.TestCase):
 
     def stored(self):
         return cb.stored_mounts(cb.load_settings(self.settings))
+
+    def stored_globally(self):
+        return cb.stored_mounts(cb.load_settings(self.global_settings))
+
+    def test_global_add_writes_the_global_file(self):
+        self.mount("--global", "add", "../lib:ro")
+        self.assertEqual(self.stored_globally(), [(self.lib, "/workspaces/lib", True)])
+        self.assertEqual(self.stored(), [])
+
+    def test_global_flag_may_follow_the_action(self):
+        self.mount("add", "--global", "--ro", "../lib")
+        self.assertEqual(self.stored_globally(), [(self.lib, "/workspaces/lib", True)])
+
+    def test_global_add_keeps_global_settings(self):
+        cb.save_global_settings({"speak": True})
+        self.mount("--global", "add", "../lib")
+        self.assertIs(cb.load_settings(self.global_settings)["speak"], True)
+
+    def test_global_add_ignores_the_current_checkouts_folder(self):
+        # Where the box starts decides that folder, so only a start can check it.
+        self.mount("--global", "add", "../lib:/workspaces/repo")
+        self.assertEqual(self.stored_globally(), [(self.lib, "/workspaces/repo", False)])
+
+    def test_global_add_still_refuses_a_fixed_target(self):
+        with self.assertRaises(cb.UsageError):
+            self.mount("--global", "add", "../lib:/home/node/.claude")
+
+    def test_ls_shows_global_mounts_marked(self):
+        self.mount("--global", "add", "../lib")
+        self.assertIn("/workspaces/lib  rw  (global)", self.mount("ls"))
+
+    def test_global_ls_shows_only_global_mounts(self):
+        self.mount("--global", "add", "../lib")
+        self.mount("add", "../lib:/mnt/lib")
+        listed = self.mount("--global", "ls")
+        self.assertIn("/workspaces/lib", listed)
+        self.assertNotIn("/mnt/lib", listed)
+        self.assertNotIn("(global)", listed)
+
+    def test_directory_mount_replaces_the_global_one_on_its_target(self):
+        self.mount("--global", "add", "../lib")
+        self.mount("add", "--ro", "../lib")
+        self.assertEqual(
+            cb.directory_mounts(self.workspace),
+            [((self.lib, "/workspaces/lib", True), "file")],
+        )
+
+    def test_directory_rm_points_at_global(self):
+        self.mount("--global", "add", "../lib")
+        with self.assertRaisesRegex(cb.CbError, "--global"):
+            self.mount("rm", "../lib")
+        self.assertEqual(len(self.stored_globally()), 1)
+
+    def test_global_rm_and_prune(self):
+        other = os.path.join(self.root, "other")
+        os.mkdir(other)
+        self.mount("--global", "add", "../lib", "../other")
+        self.mount("--global", "rm", "../lib")
+        self.assertEqual(self.stored_globally(), [(other, "/workspaces/other", False)])
+        self.mount("--global", "prune")
+        self.assertEqual(self.stored_globally(), [])
+
+    def test_global_mount_of_the_checkout_itself_is_left_out_there(self):
+        self.mount("--global", "add", ".")
+        self.assertEqual(cb.directory_mounts(self.workspace), [])
+        self.assertEqual(len(cb.directory_mounts(self.lib)), 1)
+
+    def test_a_single_file_can_be_mounted(self):
+        rc = os.path.join(self.root, "npmrc")
+        Path(rc).touch()
+        self.mount("--global", "add", "--ro", rc + ":/home/node/.npmrc")
+        self.assertEqual(self.stored_globally(), [(rc, "/home/node/.npmrc", True)])
 
     def test_add_stores_the_resolved_spec(self):
         self.mount("add", "../lib:ro")
