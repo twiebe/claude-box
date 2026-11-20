@@ -35,6 +35,36 @@ def _load_cb():
 cb = _load_cb()
 
 
+def setUpModule():
+    """No test reads or writes the real config or state: those that care set
+    their own, and the rest land here."""
+    global _sandbox, _saved_env
+    _sandbox = tempfile.TemporaryDirectory()
+    _saved_env = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+    os.environ["XDG_CONFIG_HOME"] = os.path.join(_sandbox.name, "config")
+    os.environ["XDG_STATE_HOME"] = os.path.join(_sandbox.name, "state")
+
+
+def tearDownModule():
+    for key, value in _saved_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    _sandbox.cleanup()
+
+
+def isolate_config(test, path):
+    """Point XDG_CONFIG_HOME at `path` for the length of `test`."""
+    saved = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["XDG_CONFIG_HOME"] = str(path)
+    test.addCleanup(
+        lambda: os.environ.pop("XDG_CONFIG_HOME", None)
+        if saved is None
+        else os.environ.__setitem__("XDG_CONFIG_HOME", saved)
+    )
+
+
 class SlugTest(unittest.TestCase):
     """The slug names the container and the workspace path inside the box, so it
     has to survive being used as a hostname: [a-z0-9-] only, and neither leading
@@ -156,6 +186,7 @@ class AdoptSettingsTest(unittest.TestCase):
             if state is None
             else os.environ.__setitem__("XDG_STATE_HOME", state)
         )
+        isolate_config(self, str(base / "config"))
 
     def store(self, path, **settings):
         cb.save_settings(cb.settings_path(path), settings, path)
@@ -195,6 +226,145 @@ class AdoptSettingsTest(unittest.TestCase):
             self.adopt()
         self.assertTrue(os.path.exists(cb.settings_path(self.spelled)))
         self.assertFalse(os.path.exists(cb.settings_path(str(self.real))))
+
+
+class PortableConfigTest(unittest.TestCase):
+    """The config is synced between machines whose home directories differ in
+    OS and user name, so paths under home are stored relative to it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        isolate_config(self, self.base / "config")
+        state = os.environ.get("XDG_STATE_HOME")
+        os.environ["XDG_STATE_HOME"] = str(self.base / "state")
+        self.addCleanup(os.environ.__setitem__, "XDG_STATE_HOME", state)
+        self.use_home(self.base / "Users" / "thomas")
+
+    def use_home(self, home, spelled=None):
+        """Make `home` the home directory, $HOME spelling it as `spelled`."""
+        os.makedirs(home, exist_ok=True)
+        saved = os.environ.get("HOME")
+        os.environ["HOME"] = str(spelled or home)
+        self.addCleanup(os.environ.__setitem__, "HOME", saved)
+        self.home = str(home)
+        return self.home
+
+    def adopt(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            cb.adopt_settings()
+
+    def test_a_path_under_home_is_stored_relative_to_it(self):
+        self.assertEqual(cb.portable_path(self.home + "/src/x"), "~/src/x")
+        self.assertEqual(cb.portable_path(self.home), "~")
+        self.assertEqual(cb.local_path("~/src/x"), self.home + "/src/x")
+
+    def test_a_path_elsewhere_stays_absolute(self):
+        self.assertEqual(cb.portable_path("/opt/x"), "/opt/x")
+        self.assertEqual(cb.portable_path(self.home + "x/y"), self.home + "x/y")
+        self.assertEqual(cb.local_path("/opt/x"), "/opt/x")
+
+    def test_a_symlinked_home_matches_both_spellings(self):
+        # Bazzite: /home -> /var/home, $HOME may say either.
+        real = self.base / "var" / "home" / "twiebe"
+        os.makedirs(real)
+        (self.base / "home").symlink_to(self.base / "var" / "home")
+        self.use_home(real, spelled=self.base / "home" / "twiebe")
+        self.assertEqual(cb.portable_path(str(real) + "/src/x"), "~/src/x")
+        self.assertEqual(
+            cb.portable_path(str(self.base / "home" / "twiebe" / "src")), "~/src"
+        )
+        self.assertEqual(cb.local_path("~/src"), str(real) + "/src")
+
+    def test_the_same_checkout_finds_its_settings_on_another_machine(self):
+        mac = self.home + "/src/x"
+        on_mac = cb.settings_path(mac)
+        cb.save_settings(on_mac, {"docker": True}, mac)
+        self.assertEqual(cb.load_settings(on_mac)["path"], "~/src/x")
+
+        linux = self.use_home(self.base / "var" / "home" / "twiebe") + "/src/x"
+        self.assertEqual(cb.settings_path(linux), on_mac)
+        self.assertTrue(cb.load_settings(cb.settings_path(linux))["docker"])
+
+    def test_mount_sources_under_home_are_stored_relative_to_it(self):
+        source = self.home + "/notes"
+        os.makedirs(source)
+        spec = cb.format_mount((source, "/workspaces/notes", True))
+        self.assertEqual(spec, "~/notes:/workspaces/notes:ro")
+        self.assertEqual(
+            cb.parse_mount(spec, "/"), (source, "/workspaces/notes", True)
+        )
+
+    def test_settings_move_from_the_state_directory(self):
+        workspace = self.home + "/src/x"
+        state = self.base / "state" / "claude-box"
+        os.makedirs(state / "projects")
+        (state / "settings.json").write_text(
+            json.dumps({"mounts": [self.home + "/notes:/n"]})
+        )
+        (state / "image.json").write_text(json.dumps({"rust": True}))
+        old_name = cb.container_name(workspace) + ".json"
+        (state / "projects" / old_name).write_text(
+            json.dumps({"version": 1, "path": workspace, "docker": True,
+                        "mounts": [self.home + "/lib:/l:ro"]})
+        )
+        (state / "speech.json").write_text("{}")
+
+        self.adopt()
+
+        self.assertEqual(
+            cb.load_settings(cb.global_settings_path())["mounts"], ["~/notes:/n"]
+        )
+        self.assertEqual(cb.read_json(cb.image_state_path()), {"rust": True})
+        stored = cb.load_settings(cb.settings_path(workspace))
+        self.assertEqual(stored["path"], "~/src/x")
+        self.assertEqual(stored["mounts"], ["~/lib:/l:ro"])
+        self.assertTrue(stored["docker"])
+        self.assertEqual(
+            sorted(os.listdir(self.base / "config" / "claude-box" / "projects")),
+            [os.path.basename(cb.settings_path(workspace))],
+        )
+        self.assertEqual(sorted(os.listdir(state)), ["speech.json"])
+
+    def test_the_config_directorys_own_files_win(self):
+        state = self.base / "state" / "claude-box"
+        os.makedirs(state)
+        (state / "image.json").write_text(json.dumps({"rust": True}))
+        cb.write_json(cb.image_state_path(), {"rust": False})
+        self.adopt()
+        self.assertEqual(cb.read_json(cb.image_state_path()), {"rust": False})
+        self.assertTrue((state / "image.json").exists())
+
+    def test_adopting_twice_changes_nothing(self):
+        workspace = self.home + "/src/x"
+        cb.save_settings(cb.settings_path(workspace), {"docker": True}, workspace)
+        self.adopt()
+        path = cb.settings_path(workspace)
+        before = (os.path.getmtime(path), Path(path).read_text())
+        self.adopt()
+        self.assertEqual((os.path.getmtime(path), Path(path).read_text()), before)
+
+    def test_a_move_keeps_paths_under_home_relative(self):
+        source, target = self.home + "/old", self.home + "/new"
+        cb.save_settings(cb.settings_path(source), {"docker": True}, source)
+        other = "/opt/other"
+        cb.save_settings(
+            cb.settings_path(other), {"mounts": [source + "/lib:/l"]}, other
+        )
+        moves = {old: (new, data) for old, new, data in cb.settings_moves(source, target)}
+        new, data = moves[cb.settings_path(source)]
+        self.assertEqual(new, cb.settings_path(target))
+        self.assertEqual(data["path"], "~/new")
+        self.assertEqual(moves[cb.settings_path(other)][1]["mounts"], ["~/new/lib:/l"])
+
+    def test_prune_keeps_a_relative_path_that_exists(self):
+        workspace = self.home + "/src/x"
+        os.makedirs(workspace)
+        cb.save_settings(cb.settings_path(workspace), {"docker": True}, workspace)
+        with contextlib.redirect_stdout(io.StringIO()):
+            cb.prune_settings()
+        self.assertTrue(os.path.exists(cb.settings_path(workspace)))
 
 
 class ResolveSettingsTest(unittest.TestCase):
@@ -258,6 +428,7 @@ class GlobalConfigTest(unittest.TestCase):
             if state is None
             else os.environ.__setitem__("XDG_STATE_HOME", state)
         )
+        isolate_config(self, str(base / "config"))
         self.addCleanup(setattr, cb, "current_workspace", cb.current_workspace)
         cb.current_workspace = lambda: self.workspace
 
@@ -2809,6 +2980,7 @@ class MvCommandTest(unittest.TestCase):
             if state is None
             else os.environ.__setitem__("XDG_STATE_HOME", state)
         )
+        isolate_config(self, os.path.join(root, "config"))
 
     def mv(self, *args):
         out = io.StringIO()

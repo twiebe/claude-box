@@ -124,8 +124,11 @@ def container_name(path):
 # writes the file: a flag on the command line is an answer for that run alone,
 # so trying `cb --docker` once leaves the next bare `cb` as it was.
 #
-# The store lives under XDG_STATE_HOME and not next to the Dockerfile, because
-# that directory is the git checkout.
+# The store lives under XDG_CONFIG_HOME and not next to the Dockerfile, because
+# that directory is the git checkout. It is meant to be synced between
+# machines, which may differ in OS and user name: a path under the home
+# directory is stored as ~/..., and what belongs to one machine alone - speech,
+# logs, the gpg keys - stays in state_dir().
 # ---------------------------------------------------------------------------
 
 SETTINGS_VERSION = 1
@@ -178,19 +181,59 @@ def state_dir():
     return os.path.join(base, "claude-box")
 
 
+def config_dir():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "claude-box")
+
+
+def home_dirs():
+    """The home directory as $HOME spells it and as it really is, longest
+    first. On Fedora Atomic desktops /home is a symlink to /var/home, and a
+    path cb resolved has the one spelling while $HOME may have the other."""
+    home = os.path.expanduser("~")
+    spellings = {os.path.normpath(home), os.path.realpath(home)} - {"/"}
+    return sorted(spellings, key=len, reverse=True)
+
+
+def portable_path(path):
+    """`path` as stored in the config: ~/... when it is under the home
+    directory, so the same checkout means the same thing on a machine whose
+    home is /Users/thomas and one whose home is /var/home/twiebe."""
+    for home in home_dirs():
+        if path == home:
+            return "~"
+        if path.startswith(home + "/"):
+            return "~" + path[len(home):]
+    return path
+
+
+def local_path(path):
+    """A path read from the config, ~ expanded to the real home directory -
+    the spelling every path cb resolves itself has."""
+    if path == "~" or path.startswith("~/"):
+        return os.path.realpath(os.path.expanduser("~")) + path[1:]
+    return path
+
+
 def settings_path(path):
     """Where the settings for the box in `path` live.
 
-    Named after the box without its per-run suffix, so `ls` on the store and
-    `docker ps` line up.
+    Named after the box without its per-run suffix, but hashed from the
+    portable path, so a checkout at the same place under home finds the same
+    file on every machine. Container and volumes keep the hash of the absolute
+    path: they exist on one machine only.
     """
-    return os.path.join(state_dir(), "projects", container_name(path) + ".json")
+    portable = portable_path(path)
+    name = "{}-{}-{}".format(
+        NAME_PREFIX, slug(os.path.basename(portable)), path_hash(portable)
+    )
+    return os.path.join(config_dir(), "projects", name + ".json")
 
 
 def global_settings_path():
     """Where `cb config --global` keeps what every directory gets unless its
     own settings say otherwise."""
-    return os.path.join(state_dir(), "settings.json")
+    return os.path.join(config_dir(), "settings.json")
 
 
 def load_settings(path):
@@ -216,7 +259,7 @@ def save_settings(path, overrides, workspace):
     """
     stored = load_settings(path)
     stored["version"] = SETTINGS_VERSION
-    stored["path"] = workspace
+    stored["path"] = portable_path(workspace)
     for key, value in overrides.items():
         if value is not None:
             stored[key] = value
@@ -225,27 +268,90 @@ def save_settings(path, overrides, workspace):
     return stored
 
 
-def adopt_settings():
-    """Move settings filed under a symlinked spelling to their real path.
+# What lived in state_dir() before the config moved to config_dir().
+LEGACY_CONFIG = ("settings.json", "image.json", "projects")
 
-    cb used to hash the path as the shell spelled it. A file that the real path
-    already has wins, and the other stays where it is, untouched: which of two
-    sets of answers was meant cannot be worked out here.
+
+def move_legacy_config():
+    """Move settings, image.json and projects/ from the state directory, where
+    cb kept them before they were synced, to the config directory. Whatever the
+    config directory already has wins; the other copy stays where it is."""
+    for name in LEGACY_CONFIG:
+        old = os.path.join(state_dir(), name)
+        new = os.path.join(config_dir(), name)
+        if os.path.isdir(old) and not os.path.islink(old):
+            for entry in sorted(os.listdir(old)):
+                move_file(os.path.join(old, entry), os.path.join(new, entry))
+            if not DRY_RUN and not os.listdir(old):
+                os.rmdir(old)
+        elif os.path.isfile(old):
+            move_file(old, new)
+
+
+def move_file(old, new):
+    if os.path.lexists(new):
+        return
+    if DRY_RUN:
+        print("+ mv {} {}".format(old, new))
+        return
+    os.makedirs(os.path.dirname(new), exist_ok=True)
+    shutil.move(old, new)
+    print("config: {} -> {}".format(old, new), file=sys.stderr)
+
+
+def portable_mounts(specs):
+    """Stored mount specs with their sources rewritten as portable paths, or
+    the specs as they were when one cannot be read - stored_mounts reports
+    that, with the file it is in."""
+    if not isinstance(specs, list):
+        return specs
+    try:
+        return [format_mount(parse_mount(str(spec), "/")) for spec in specs]
+    except UsageError:
+        return specs
+
+
+def adopt_settings():
+    """Bring stored settings to the form this cb reads.
+
+    Moves them out of the old state directory, files settings recorded under a
+    symlinked spelling or an absolute path under home under the real, portable
+    path, and rewrites mount sources the same way. A file the new name already
+    has wins, and the other stays where it is, untouched: which of two sets of
+    answers was meant cannot be worked out here.
     """
-    directory = os.path.join(state_dir(), "projects")
+    move_legacy_config()
+
+    global_path = global_settings_path()
+    stored = read_json(global_path)
+    if "mounts" in stored:
+        updated = dict(stored, mounts=portable_mounts(stored["mounts"]))
+        if updated != stored:
+            write_json(global_path, updated)
+
+    directory = os.path.join(config_dir(), "projects")
     for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
         path = os.path.join(directory, name)
         stored = read_json(path)
         spelled = stored.get("path")
-        if not isinstance(spelled, str) or not os.path.isabs(spelled):
+        if not isinstance(spelled, str):
             continue
-        real = os.path.realpath(spelled)
+        real = os.path.realpath(local_path(spelled))
+        if not os.path.isabs(real):
+            continue
+        updated = dict(stored, path=portable_path(real))
+        if "mounts" in stored:
+            updated["mounts"] = portable_mounts(stored["mounts"])
         new_path = settings_path(real)
-        if real == spelled or os.path.exists(new_path):
+        if new_path == path:
+            if updated != stored:
+                write_json(path, updated)
             continue
-        write_json(new_path, dict(stored, path=real))
+        if os.path.exists(new_path):
+            continue
+        write_json(new_path, updated)
         remove_file(path)
-        print("settings: {} -> {}".format(spelled, real), file=sys.stderr)
+        print("settings: {} -> {}".format(spelled, updated["path"]), file=sys.stderr)
 
 
 def resolve_settings(stored, overrides, global_stored=None):
@@ -781,7 +887,7 @@ def pick_box(rows, workspace, name):
 
 
 def image_state_path():
-    return os.path.join(state_dir(), "image.json")
+    return os.path.join(config_dir(), "image.json")
 
 
 def read_image_state():
@@ -1370,9 +1476,12 @@ def parse_mount(spec, workspace):
 
 
 def format_mount(mount):
-    """The spec string parse_mount reads back, as stored in the settings."""
+    """The spec string parse_mount reads back, as stored in the settings: a
+    source under home as ~/..., which parse_mount expands again."""
     source, target, readonly = mount
-    return "{}:{}{}".format(source, target, ":ro" if readonly else "")
+    return "{}:{}{}".format(
+        portable_path(source), target, ":ro" if readonly else ""
+    )
 
 
 def mount_value(mount):
@@ -2800,12 +2909,12 @@ def prune_settings():
     The store is keyed by path, so a deleted checkout leaves a file behind that
     nothing will ever read again.
     """
-    directory = os.path.join(state_dir(), "projects")
+    directory = os.path.join(config_dir(), "projects")
     removed = []
     for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
         path = os.path.join(directory, name)
         workspace = read_json(path).get("path")
-        if workspace and not os.path.isdir(workspace):
+        if workspace and not os.path.isdir(local_path(workspace)):
             if DRY_RUN:
                 print("+ rm " + path)
             else:
@@ -3243,7 +3352,7 @@ def settings_moves(source, target):
     A file already at the new name belongs to a directory that does not exist,
     since the target does not, and is overwritten.
     """
-    directory = os.path.join(state_dir(), "projects")
+    directory = os.path.join(config_dir(), "projects")
     moves = []
     for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else []:
         path = os.path.join(directory, name)
@@ -3252,9 +3361,9 @@ def settings_moves(source, target):
             continue
         updated = dict(stored)
         new_path = path
-        workspace = relocate(stored.get("path") or "", source, target)
+        workspace = relocate(local_path(stored.get("path") or ""), source, target)
         if workspace is not None:
-            updated["path"] = workspace
+            updated["path"] = portable_path(workspace)
             new_path = settings_path(workspace)
         specs = stored.get("mounts") or []
         if not isinstance(specs, list):

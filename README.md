@@ -84,16 +84,24 @@ this directory.
 ## Box settings: `cb config`
 
 Each directory has its own settings, stored under
-`~/.local/state/claude-box/projects/`. A flag applies to that run only;
+`~/.config/claude-box/projects/`. A flag applies to that run only;
 `cb config` makes it stick. `cb config --global` sets a default for every
 directory that has no value of its own, stored in
-`~/.local/state/claude-box/settings.json`. Flag beats directory setting beats
+`~/.config/claude-box/settings.json`. Flag beats directory setting beats
 global setting beats default (all off).
 
 A directory is identified by its real path, with every symlink resolved, so
 `/home/you/repo` and `/var/home/you/repo` on Fedora Atomic desktops are one box
 with one set of settings. The same goes for `cb enable` tags: the ones that count
 sit at or above the real directory, not above a symlink leading to it.
+
+`~/.config/claude-box/` (or `$XDG_CONFIG_HOME/claude-box/`) holds only what
+you told cb - settings, mounts, ports, image features - and can be synced
+between machines, macOS and Linux alike. Paths under the home directory are
+stored as `~/...`, so `~/src/repo` finds its settings whether home is
+`/Users/thomas` or `/var/home/twiebe`. What belongs to one machine stays in
+`~/.local/state/claude-box/`. Settings from before this move from there to
+the config directory the next time cb runs.
 
 | Setting     | Flag                             | Effect                                                                                           |
 | ----------- | -------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -158,7 +166,7 @@ target replaces that mount for one run, for example to make it read-only once.
 none; `add --ro` makes every one of them read-only.
 
 `--global` remembers mounts for every directory, stored next to the global
-settings in `~/.local/state/claude-box/settings.json`:
+settings in `~/.config/claude-box/settings.json`:
 
 ```sh
 cb mount --global add --ro ~/.npmrc:/home/node/.npmrc
@@ -303,7 +311,7 @@ cb rebuild-image --with-rust --with-sqlx --without-go
 cb rebuild-image --no-cache    # from scratch, e.g. for newer apt packages
 ```
 
-The choice is kept in `~/.local/state/claude-box/image.json`. The image also
+The choice is kept in `~/.config/claude-box/image.json`. The image also
 carries it as a label, so `docker inspect` remains the authority on what was
 actually built.
 

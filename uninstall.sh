@@ -34,6 +34,7 @@ cat <<HINT
 left in place, remove by hand if wanted:
   images:   docker image rm claude-box:latest claude-box:base
   volumes:  docker volume ls --filter name=cb-
-  settings: ${XDG_STATE_HOME:-${HOME}/.local/state}/claude-box
+  settings: ${XDG_CONFIG_HOME:-${HOME}/.config}/claude-box
+  state:    ${XDG_STATE_HOME:-${HOME}/.local/state}/claude-box
   checkout: ${SRC_DIR}
 HINT
